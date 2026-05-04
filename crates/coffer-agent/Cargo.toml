@@ -1,0 +1,26 @@
+[package]
+name = "coffer-agent"
+version = "0.1.0"
+edition = "2021"
+authors = ["AgentLink Team <team@agentlink.chat>"]
+license = "MIT"
+rust-version = "1.78"
+description = "Coffer guest agent — runs inside MicroVMs"
+
+[[bin]]
+name = "coffer-agent"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.43", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+coffer-protocol = { path = "../coffer-protocol" }
+
+# Vsock support
+tokio-vsock = "0.5"
+
+# Error handling
+thiserror = "2.0"

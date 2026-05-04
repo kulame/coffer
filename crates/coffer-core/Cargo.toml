@@ -1,0 +1,27 @@
+[package]
+name = "coffer-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["AgentLink Team <team@agentlink.chat>"]
+license = "MIT"
+rust-version = "1.78"
+description = "Coffer — fast, secure MicroVM runtime for AI Agents"
+
+[dependencies]
+tokio = { version = "1.43", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+uuid = { version = "1.12", features = ["v4", "serde"] }
+bytes = "1.9"
+dashmap = "6.1"
+parking_lot = "0.12"
+coffer-protocol = { path = "../coffer-protocol" }
+
+# Utilities
+dirs = "5.0"
+
+[dev-dependencies]
+tokio-test = "0.4"

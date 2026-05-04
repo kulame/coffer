@@ -1,0 +1,48 @@
+# =============================================================================
+# Rust
+# =============================================================================
+target/
+**/*.rlib
+**/*.rmeta
+
+# Cargo.lock is kept for binary projects to ensure reproducible builds.
+# If coffer-protocol becomes a published crate, reconsider this.
+# Cargo.lock
+
+# =============================================================================
+# IDEs
+# =============================================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# =============================================================================
+# OS
+# =============================================================================
+.DS_Store
+Thumbs.db
+
+# =============================================================================
+# Coffer runtime & build artifacts (not source code)
+# =============================================================================
+
+# Downloaded / compiled binaries
+kernel/build/
+kernel/microvm-kernel-ci-x86_64-5.10.config
+rootfs-builder/coffer-agent
+rootfs-builder/output/
+
+# Runtime state directories
+.coffer/
+run/
+templates/
+*.sock
+*.log
+*.snap
+*.mem
+
+# Test artifacts
+*.erofs
+*.ext4
