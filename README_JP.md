@@ -3,6 +3,8 @@
 > **AI Agent 向け高密度 MicroVM ランタイム**  
 > ウォーム起動 <50ms · コールドスタート <150ms · メモリオーバーヘッド <50MB/インスタンス · 密度 500+/ノード
 
+[![CI](https://github.com/kulame/coffer/actions/workflows/ci.yml/badge.svg)](https://github.com/kulame/coffer/actions)
+[![Crates.io](https://img.shields.io/crates/v/coffer-core.svg)](https://crates.io/crates/coffer-core)
 [![Rust](https://img.shields.io/badge/rust-1.78%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -217,4 +219,4 @@ MIT — [LICENSE](LICENSE) を参照してください。
 
 ---
 
-**Coffer** は [AgentLink](https://github.com/agentlink-im/agentlink) エコシステムの一部です。
+> Rust と Firecracker で構築。コンテナ不要、オーバーヘッドなし。

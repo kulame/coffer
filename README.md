@@ -3,6 +3,8 @@
 > **High-density MicroVM runtime for AI Agents**  
 > Warm acquire <50ms · Cold start <150ms · Memory overhead <50MB/instance · Density 500+/node
 
+[![CI](https://github.com/kulame/coffer/actions/workflows/ci.yml/badge.svg)](https://github.com/kulame/coffer/actions)
+[![Crates.io](https://img.shields.io/crates/v/coffer-core.svg)](https://crates.io/crates/coffer-core)
 [![Rust](https://img.shields.io/badge/rust-1.78%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -215,4 +217,4 @@ MIT — see [LICENSE](LICENSE).
 
 ---
 
-**Coffer** is part of the [AgentLink](https://github.com/agentlink-im/agentlink) ecosystem.
+> Built with Rust and Firecracker. No containers, no overhead.

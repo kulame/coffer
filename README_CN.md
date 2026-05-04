@@ -3,6 +3,8 @@
 > **面向 AI Agent 的高密度 MicroVM 运行时**  
 > 热启动 <50ms · 冷启动 <150ms · 内存开销 <50MB/实例 · 单节点 500+ 密度
 
+[![CI](https://github.com/kulame/coffer/actions/workflows/ci.yml/badge.svg)](https://github.com/kulame/coffer/actions)
+[![Crates.io](https://img.shields.io/crates/v/coffer-core.svg)](https://crates.io/crates/coffer-core)
 [![Rust](https://img.shields.io/badge/rust-1.78%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -215,4 +217,4 @@ MIT — 详见 [LICENSE](LICENSE)。
 
 ---
 
-**Coffer** 是 [AgentLink](https://github.com/agentlink-im/agentlink) 生态系统的一部分。
+> 基于 Rust 与 Firecracker 构建。无容器，无额外开销。
