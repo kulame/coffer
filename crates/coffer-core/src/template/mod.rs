@@ -299,6 +299,13 @@ fn spawn_firecracker(
     log_path: &Path,
 ) -> Result<tokio::process::Child> {
     use tokio::process::Command;
+    // Firecracker requires the log file to exist before it starts.
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if !log_path.exists() {
+        std::fs::File::create(log_path)?;
+    }
     let child = Command::new(fc_path)
         .arg("--api-sock").arg(socket_path)
         .arg("--log-path").arg(log_path)
