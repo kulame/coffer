@@ -499,17 +499,19 @@ async fn cmd_check() -> Result<()> {
         check_file(&config.agent_bin),
     );
 
-    // KVM
+    // KVM (must be readable and writable — Firecracker opens it O_RDWR)
     ok &= check(
-        "/dev/kvm access",
-        std::fs::metadata("/dev/kvm")
-            .map_err(anyhow::Error::from)
-            .and_then(|m| {
-                if m.permissions().readonly() {
-                    Err(anyhow::anyhow!("/dev/kvm is read-only"))
-                } else {
-                    Ok(())
-                }
+        "/dev/kvm read+write",
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/kvm")
+            .map(|_| ())
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "{}. To fix:\n    sudo usermod -aG kvm $(whoami) && newgrp kvm\n  or:\n    sudo chmod 666 /dev/kvm",
+                    e
+                )
             }),
     );
 
