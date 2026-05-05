@@ -8,7 +8,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.78%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-[English](./README.md) · [中文](./README_CN.md)
+[English](./README_EN.md) · [中文](./README.md)
 
 ---
 

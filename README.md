@@ -1,139 +1,139 @@
 # Coffer
 
-> **High-density MicroVM runtime for AI Agents**  
-> Warm acquire <50ms · Cold start <150ms · Memory overhead <50MB/instance · Density 500+/node
+> **面向 AI Agent 的高密度 MicroVM 运行时**  
+> 热启动 <50ms · 冷启动 <150ms · 内存开销 <50MB/实例 · 单节点 500+ 密度
 
 [![CI](https://github.com/kulame/coffer/actions/workflows/ci.yml/badge.svg)](https://github.com/kulame/coffer/actions)
 [![Crates.io](https://img.shields.io/crates/v/coffer-core.svg)](https://crates.io/crates/coffer-core)
 [![Rust](https://img.shields.io/badge/rust-1.78%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-[中文](./README_CN.md) · [日本語](./README_JP.md)
+[English](./README_EN.md) · [日本語](./README_JP.md)
 
 ---
 
-## What is Coffer?
+## 什么是 Coffer？
 
-**Coffer** is a Rust-based MicroVM runtime built on [AWS Firecracker](https://github.com/firecracker-microvm/firecracker). It provides fast, isolated, and resource-efficient sandboxing for AI agents, serverless functions, and edge workloads.
+**Coffer** 是一个基于 Rust 的 MicroVM 运行时，底层采用 [AWS Firecracker](https://github.com/firecracker-microvm/firecracker)。它为 AI Agent、Serverless 函数和边缘工作负载提供快速、隔离且资源高效的沙箱环境。
 
-Unlike containers, Coffer uses hardware-virtualized MicroVMs with:
-- **True kernel-level isolation** — each workload runs in its own Linux kernel
-- **Snapshot resume** — pre-booted VMs restored from memory snapshots in milliseconds
-- **Warm pool** — background workers keep a pool of paused VMs ready for instant allocation
-- **EROFS + overlayfs rootfs** — immutable, compressed root filesystems with writable tmpfs overlay
+与传统容器相比，Coffer 使用硬件虚拟化的 MicroVM，具备以下特性：
+- **真正的内核级隔离** — 每个工作负载在独立的 Linux 内核中运行
+- **快照恢复** — 从内存快照恢复预启动的 VM，耗时仅数毫秒
+- **热池（Warm Pool）** — 后台工作线程维持一组暂停状态的 VM，实现即时分配
+- **EROFS + overlayfs 根文件系统** — 不可变的压缩只读根文件系统，配合可写的 tmpfs 覆盖层
 
-## Architecture
+## 架构
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        Host (Linux)                          │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │  Warm Pool  │  │   Runtime   │  │   Template Manager  │  │
-│  │  (Paused    │  │  (Acquire   │  │  (OCI → EROFS →     │  │
-│  │   VMs)      │  │   / Release)│  │   Snapshot)         │  │
+│  │  热池        │  │   运行时     │  │   模板管理器         │  │
+│  │ (暂停的 VM)  │  │ (获取/释放)  │  │ (OCI → EROFS →      │  │
+│  │              │  │              │  │  快照)              │  │
 │  └──────┬──────┘  └──────┬──────┘  └─────────────────────┘  │
 │         │                │                                   │
 │  ┌──────▼────────────────▼──────┐  ┌─────────────────────┐  │
-│  │   Firecracker HTTP/1.1       │  │   Network Manager   │  │
-│  │   over Unix Domain Socket    │  │  (TAP + bridge +    │  │
+│  │   Firecracker HTTP/1.1       │  │   网络管理器         │  │
+│  │   over Unix Domain Socket    │  │  (TAP + 网桥 +      │  │
 │  │                              │  │   iptables SNAT)    │  │
 │  └──────────────┬───────────────┘  └─────────────────────┘  │
 │                 │                                            │
 │         ┌───────▼────────┐  ┌──────────────────────────┐    │
-│         │  Jailer (opt)  │  │  skopeo + umoci +        │    │
-│         │  chroot/seccomp│  │  mkfs.erofs pipeline     │    │
+│         │  Jailer (可选) │  │  skopeo + umoci +        │    │
+│         │  chroot/seccomp│  │  mkfs.erofs 流水线       │    │
 │         └───────┬────────┘  └──────────────────────────┘    │
 │                 │                                            │
 └─────────────────┼────────────────────────────────────────────┘
-                  │ vsock (port 1024)
+                  │ vsock (端口 1024)
 ┌─────────────────▼────────────────────────────────────────────┐
 │                    MicroVM Guest (Linux)                      │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │ coffer-init │  │ coffer-agent│  │  User Workload      │  │
-│  │(overlayfs  │  │(vsock JSON  │  │  (agentlet, script, │  │
-│  │ pivot_root)│  │  Lines RPC) │  │   serverless fn)    │  │
+│  │ coffer-init │  │ coffer-agent│  │  用户工作负载        │  │
+│  │(overlayfs  │  │(vsock JSON  │  │  (agentlet, 脚本,   │  │
+│  │ pivot_root)│  │  Lines RPC) │  │   serverless 函数)  │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘  │
 │                                                               │
-│  Rootfs: EROFS (ro) + tmpfs overlay (rw)                     │
+│  Rootfs: EROFS (只读) + tmpfs overlay (读写)                 │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Performance
+## 性能指标
 
-| Metric | Target | Status |
-|--------|--------|--------|
-| Warm acquire | < 50 ms | ✅ ~30 ms (snapshot resume) |
-| Cold start | < 150 ms | ✅ ~120 ms (kernel boot + agent ready) |
-| Memory overhead | < 50 MB/instance | ✅ ~35 MB (64 MiB guest + VMM) |
-| Density | 500+ / node | ✅ achievable on 32 vCPU / 128 GiB |
+| 指标 | 目标 | 状态 |
+|------|------|------|
+| 热启动 | < 50 ms | ✅ ~30 ms（快照恢复） |
+| 冷启动 | < 150 ms | ✅ ~120 ms（内核启动 + Agent 就绪） |
+| 内存开销 | < 50 MB/实例 | ✅ ~35 MB（64 MiB 客户机 + VMM） |
+| 部署密度 | 500+ / 节点 | ✅ 在 32 vCPU / 128 GiB 上可达 |
 
-## Quick Start
+## 快速开始
 
-### Prerequisites
+### 前置条件
 
-- Linux host with KVM enabled (`/dev/kvm` accessible)
+- 启用 KVM 的 Linux 主机（`/dev/kvm` 可访问）
 - Rust 1.78+
-- Build tools for kernel: `gcc`, `make`, `bc`, `bison`, `flex`, `libssl-dev`, `libelf-dev`, `wget`
-- Build tools for rootfs: `erofs-utils`, `lz4`
-- `skopeo`, `umoci` (optional, only for template builds from OCI images)
+- 内核编译工具：`gcc`、`make`、`bc`、`bison`、`flex`、`libssl-dev`、`libelf-dev`、`wget`
+- 根文件系统工具：`erofs-utils`、`lz4`
+- `skopeo`、`umoci`（可选，仅用于从 OCI 镜像构建模板）
 
-### 1. One-Line Install (Recommended)
+### 1. 一行命令安装（推荐）
 
 ```bash
 make install
 ```
 
-This will:
-1. Install system dependencies (auto-detects your distro)
-2. Build all Rust crates in release mode
-3. Download Firecracker + Jailer (or use pre-built local copies)
-4. Build the guest kernel (or use pre-built local copy)
-5. Install `coffer-cli` to `/usr/local/bin` and runtime data to `~/.coffer`
-6. Create the default `alpine` template (requires root for KVM / network setup)
+这会完成以下步骤：
+1. 安装系统依赖（自动检测发行版）
+2. 以 Release 模式编译所有 Rust crate
+3. 下载 Firecracker + Jailer（或使用本地预构建副本）
+4. 构建客户机内核（或使用本地预构建副本）
+5. 安装 `coffer-cli` 到 `/usr/local/bin`，运行时数据到 `~/.coffer`
+6. 创建默认的 `alpine` 模板（需要 root 权限进行 KVM / 网络设置）
 
-If template creation fails due to permissions, run it separately with root:
+如果模板创建因权限失败，可单独用 root 补执行：
 ```bash
 sudo coffer-cli template build --name alpine docker.io/library/alpine:latest
 ```
 
-### 2. Manual Step-by-Step Install
+### 2. 手动分步安装
 
-If you prefer finer control over the installation:
+如果你希望对安装过程有更细粒度的控制：
 
 ```bash
-make install-deps   # Install system dependencies
-make build          # Build Rust workspace
-make firecracker    # Download Firecracker + Jailer → ~/.coffer/kernel
-make kernel         # Build guest kernel → ~/.coffer/kernel/vmlinux
-make rootfs         # Build minimal rootfs → ~/.coffer/templates/alpine
-make template       # Create warm-start snapshot
+make install-deps   # 安装系统依赖
+make build          # 编译 Rust 工作空间
+make firecracker    # 下载 Firecracker + Jailer → ~/.coffer/kernel
+make kernel         # 构建客户机内核 → ~/.coffer/kernel/vmlinux
+make rootfs         # 构建最小根文件系统 → ~/.coffer/templates/alpine
+make template       # 创建热启动快照
 ```
 
-### 3. Use the CLI
+### 3. 使用 CLI
 
-Coffer includes a command-line tool for rapid sandbox testing:
+Coffer 提供了命令行工具，方便快速进行沙箱测试：
 
 ```bash
-# Check system readiness
+# 检查系统就绪状态
 coffer-cli check
 
-# List available templates
+# 列出可用模板
 coffer-cli template list
 
-# Run a quick command (acquire → exec → auto-release)
+# 快速运行一条命令（获取 → 执行 → 自动释放）
 coffer-cli run --template alpine -- echo "hello from MicroVM"
 
-# Run with file upload/download and custom env
-coffer-cli run --template alpine \
+# 带文件上传/下载和环境变量的运行
+ccoffer-cli run --template alpine \
   --upload ./script.sh:/tmp/script.sh \
   --env FOO=bar \
   -- /bin/sh /tmp/script.sh
 
-# View warm pool status
+# 查看热池状态
 coffer-cli pool-status
 ```
 
-Environment variables for CLI paths:
+CLI 路径支持通过环境变量覆盖：
 ```bash
 export COFFER_FIRECRACKER_PATH=~/.coffer/kernel/firecracker
 export COFFER_KERNEL_PATH=~/.coffer/kernel/vmlinux
@@ -141,7 +141,7 @@ export COFFER_TEMPLATE_DIR=~/.coffer/templates
 export COFFER_AGENT_BIN=~/.coffer/bin/coffer-agent
 ```
 
-### 7. Use as a Library
+### 4. 作为库使用
 
 ```rust
 use coffer_core::{Runtime, RuntimeConfig, SandboxHandle};
@@ -151,48 +151,48 @@ async fn main() -> anyhow::Result<()> {
     let config = RuntimeConfig::default();
     let runtime = Runtime::new(config).await?;
 
-    // Warm acquire (<50ms)
+    // 热启动（<50ms）
     let sandbox: SandboxHandle = runtime.acquire("alpine").await?;
 
-    // Communicate over vsock
+    // 通过 vsock 通信
     let vsock_path = sandbox.vsock_path();
-    // ... send AgentRequest, receive AgentResponse
+    // ... 发送 AgentRequest，接收 AgentResponse
 
-    drop(sandbox); // Returns VM to warm pool
+    drop(sandbox); // 将 VM 归还热池
     Ok(())
 }
 ```
 
-## Workspace Crates
+## 工作空间 Crate
 
-| Crate | Description |
-|-------|-------------|
-| `coffer-protocol` | Host-guest JSON Lines protocol over vsock |
-| `coffer-core` | Firecracker client, runtime, warm pool, templates, networking |
-| `coffer-agent` | Guest-side agent binary (runs inside MicroVM) |
-| `coffer-cli` | Command-line interface for sandbox management and testing |
+| Crate | 描述 |
+|-------|------|
+| `coffer-protocol` | 基于 vsock 的宿主机-客户机 JSON Lines 协议 |
+| `coffer-core` | Firecracker 客户端、运行时、热池、模板、网络 |
+| `coffer-agent` | 客户机端 Agent 二进制（在 MicroVM 内部运行） |
+| `coffer-cli` | 用于沙箱管理和测试的命令行界面 |
 
-## Protocol
+## 协议
 
-Coffer uses a simple JSON Lines protocol over **vsock port 1024**.
+Coffer 使用简单的 JSON Lines 协议，通过 **vsock 端口 1024** 通信。
 
-### Request
+### 请求
 
 ```json
 {"method":"exec","request_id":"r1","cmd":["echo","hello"],"env":{},"working_dir":null,"stdin":null,"timeout_ms":5000}
 ```
 
-### Response
+### 响应
 
 ```json
 {"status":"ok","request_id":"r1","exit_code":0,"stdout":"aGVsbG8=","stderr":""}
 ```
 
-Methods: `exec`, `upload`, `download`, `ping`
+支持的方法：`exec`、`upload`、`download`、`ping`
 
-See [`coffer-protocol/src/lib.rs`](crates/coffer-protocol/src/lib.rs) for full schema.
+完整协议定义见 [`coffer-protocol/src/lib.rs`](crates/coffer-protocol/src/lib.rs)。
 
-## Configuration
+## 配置
 
 ```rust
 RuntimeConfig {
@@ -214,23 +214,23 @@ RuntimeConfig {
 }
 ```
 
-## Security Model
+## 安全模型
 
-- **Kernel isolation** — each sandbox runs its own Linux kernel via KVM
-- **Jailer support** — optional chroot + seccomp + namespace isolation for the Firecracker process itself
-- **Network policy** — per-sandbox egress allowlist/denylist via iptables
-- **EROFS immutability** — root filesystem is read-only; all writes go to tmpfs overlay
-- **VMGenID** — Firecracker reseeds guest entropy on every snapshot resume
+- **内核隔离** — 每个沙箱通过 KVM 运行独立的 Linux 内核
+- **Jailer 支持** — 可选的 chroot + seccomp + 命名空间隔离，保护 Firecracker 进程本身
+- **网络策略** — 通过 iptables 为每个沙箱配置出站允许/拒绝列表
+- **EROFS 不可变性** — 根文件系统只读；所有写入操作转到 tmpfs 覆盖层
+- **VMGenID** — Firecracker 在每次快照恢复时重新播种客户机熵源
 
-## License
+## 许可证
 
-MIT — see [LICENSE](LICENSE).
+MIT — 详见 [LICENSE](LICENSE)。
 
-## Acknowledgements
+## 致谢
 
-- [AWS Firecracker](https://github.com/firecracker-microvm/firecracker) — the underlying VMM
-- [EROFS](https://erofs.docs.kernel.org/) — enhanced read-only filesystem
+- [AWS Firecracker](https://github.com/firecracker-microvm/firecracker) — 底层 VMM
+- [EROFS](https://erofs.docs.kernel.org/) — 增强型只读文件系统
 
 ---
 
-> Built with Rust and Firecracker. No containers, no overhead.
+> 基于 Rust 与 Firecracker 构建。无容器，无额外开销。
