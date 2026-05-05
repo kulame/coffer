@@ -243,14 +243,25 @@ check-deps:
 # Firecracker binary (downloaded directly)
 # ===================================================================
 firecracker:
-	@echo "Downloading Firecracker v$(FIRECRACKER_VERSION)..."
-	@mkdir -p $(KERNEL_DIR)
-	cd $(KERNEL_DIR) && curl -fsSL $(FIRECRACKER_URL) | tar -xz
-	cp $(KERNEL_DIR)/release-v$(FIRECRACKER_VERSION)-$(ARCH)/firecracker-v$(FIRECRACKER_VERSION)-$(ARCH) $(KERNEL_DIR)/firecracker
-	cp $(KERNEL_DIR)/release-v$(FIRECRACKER_VERSION)-$(ARCH)/jailer-v$(FIRECRACKER_VERSION)-$(ARCH) $(KERNEL_DIR)/jailer
-	chmod +x $(KERNEL_DIR)/firecracker $(KERNEL_DIR)/jailer
-	rm -rf $(KERNEL_DIR)/release-v$(FIRECRACKER_VERSION)-$(ARCH)
-	@echo "✓ Firecracker installed to $(KERNEL_DIR)/firecracker"
+	@if [ -f "$(KERNEL_DIR)/firecracker" ]; then \
+		echo "✓ Firecracker already exists at $(KERNEL_DIR)/firecracker"; \
+	else \
+		echo "Downloading Firecracker v$(FIRECRACKER_VERSION)..."; \
+		mkdir -p $(KERNEL_DIR); \
+		cd $(KERNEL_DIR) && curl -fsSL $(FIRECRACKER_URL) | tar -xz; \
+		cp $(KERNEL_DIR)/release-v$(FIRECRACKER_VERSION)-$(ARCH)/firecracker-v$(FIRECRACKER_VERSION)-$(ARCH) $(KERNEL_DIR)/firecracker; \
+		cp $(KERNEL_DIR)/release-v$(FIRECRACKER_VERSION)-$(ARCH)/jailer-v$(FIRECRACKER_VERSION)-$(ARCH) $(KERNEL_DIR)/jailer; \
+		chmod +x $(KERNEL_DIR)/firecracker $(KERNEL_DIR)/jailer; \
+		rm -rf $(KERNEL_DIR)/release-v$(FIRECRACKER_VERSION)-$(ARCH); \
+		echo "✓ Firecracker installed to $(KERNEL_DIR)/firecracker"; \
+	fi
+
+firecracker-force:
+	@echo "Forcing re-download of Firecracker v$(FIRECRACKER_VERSION)..."
+	@# Kill any running firecracker processes that may lock the binary
+	@pgrep -x firecracker >/dev/null 2>&1 && pkill -x firecracker && sleep 1 || true
+	@rm -f $(KERNEL_DIR)/firecracker $(KERNEL_DIR)/jailer
+	@$(MAKE) firecracker
 
 # ===================================================================
 # Kernel build (native, no Docker)
