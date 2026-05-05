@@ -124,9 +124,11 @@ impl ImageBuilder {
 
         info!("Unpacking OCI image with umoci");
 
+        // Use --rootless to avoid chown permission errors in unprivileged environments.
         let status = Command::new("umoci")
             .args([
                 "unpack",
+                "--rootless",
                 "--image",
                 &format!("{}:latest", oci_dir.display()),
                 &rootfs_dir.display().to_string(),
