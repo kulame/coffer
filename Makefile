@@ -278,7 +278,7 @@ rootfs:
 # ===================================================================
 # Full template (rootfs + snapshot)
 # ===================================================================
-template: rootfs kernel firecracker build
+template: rootfs kernel firecracker build install-bin
 	@echo "Creating template snapshot..."
 	@if [ -f "$(BINDIR)/coffer-cli" ]; then \
 		CLI="$(BINDIR)/coffer-cli"; \

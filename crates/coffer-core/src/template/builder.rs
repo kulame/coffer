@@ -125,22 +125,51 @@ impl ImageBuilder {
         info!("Unpacking OCI image with umoci");
 
         // Use --rootless to avoid chown permission errors in unprivileged environments.
-        let status = Command::new("umoci")
-            .args([
-                "unpack",
-                "--rootless",
-                "--image",
-                &format!("{}:latest", oci_dir.display()),
-                &rootfs_dir.display().to_string(),
-            ])
-            .status()
-            .await
-            .map_err(|e| CofferError::TemplateBuild(format!(
-                "umoci not found or failed to start: {}. Please install umoci.", e
-            )))?;
+        let mut cmd = Command::new("umoci");
+        cmd.args([
+            "unpack",
+            "--rootless",
+            "--image",
+            &format!("{}:latest", oci_dir.display()),
+            &rootfs_dir.display().to_string(),
+        ]);
+
+        let status = cmd.status().await.map_err(|e| {
+            CofferError::TemplateBuild(format!(
+                "umoci not found or failed to start: {}. Please install umoci.",
+                e
+            ))
+        })?;
 
         if !status.success() {
-            return Err(CofferError::TemplateBuild("umoci unpack failed".into()));
+            // Fallback: use unshare -rm to create a user namespace where chown works.
+            warn!("umoci --rootless failed, retrying with unshare -rm ...");
+            let fallback = Command::new("unshare")
+                .args([
+                    "-rm",
+                    "umoci",
+                    "unpack",
+                    "--rootless",
+                    "--image",
+                    &format!("{}:latest", oci_dir.display()),
+                    &rootfs_dir.display().to_string(),
+                ])
+                .status()
+                .await
+                .map_err(|e| {
+                    CofferError::TemplateBuild(format!(
+                        "unshare/umoci not found or failed to start: {}. Please install umoci.",
+                        e
+                    ))
+                })?;
+
+            if !fallback.success() {
+                return Err(CofferError::TemplateBuild(
+                    "umoci unpack failed (tried both --rootless and unshare -rm). \
+                     If running unprivileged, ensure umoci >= 0.4.7 is installed."
+                        .into(),
+                ));
+            }
         }
         Ok(())
     }
