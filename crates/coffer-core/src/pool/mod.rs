@@ -105,6 +105,19 @@ impl WarmPool {
         debug!(%vm_id, "Released from active use");
     }
 
+    /// Returns the number of available (warmed) VMs per template.
+    pub fn available_counts(&self) -> std::collections::HashMap<String, usize> {
+        self.available
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().lock().len()))
+            .collect()
+    }
+
+    /// Returns the number of currently in-use VMs.
+    pub fn in_use_count(&self) -> usize {
+        self.in_use.len()
+    }
+
     fn start_worker(&self, mut rx: mpsc::UnboundedReceiver<PoolCommand>) {
         let available = self.available.clone();
         let templates = self.templates.clone();
@@ -146,7 +159,7 @@ async fn warm_one(
     queue: &Arc<Mutex<Vec<PooledVm>>>,
 ) -> crate::error::Result<()> {
     let template = templates.get(template_id)?;
-    let vm_id = format!("coffer-pool-{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+    let vm_id = format!("coffer-pool-{}", &uuid::Uuid::new_v4().to_string()[..8]);
     let vsock_path = config.socket_dir.join("vsock").join(format!("{}.sock", vm_id));
 
     let tap = network.allocate_tap(&vm_id).await?;

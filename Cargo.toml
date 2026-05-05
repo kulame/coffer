@@ -3,6 +3,7 @@ members = [
     "crates/coffer-core",
     "crates/coffer-protocol",
     "crates/coffer-agent",
+    "crates/coffer-cli",
 ]
 resolver = "2"
 

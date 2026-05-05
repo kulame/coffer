@@ -34,8 +34,8 @@ impl Default for RuntimeConfig {
         Self {
             template_dir: coffer_home.join("templates"),
             socket_dir: coffer_home.join("run"),
-            firecracker_path: PathBuf::from("/usr/bin/firecracker"),
-            jailer_path: Some(PathBuf::from("/usr/bin/jailer")),
+            firecracker_path: coffer_home.join("kernel/firecracker"),
+            jailer_path: Some(coffer_home.join("kernel/jailer")),
             kernel_path: coffer_home.join("kernel/vmlinux"),
             agent_bin: coffer_home.join("bin/coffer-agent"),
             pool: PoolConfig::default(),

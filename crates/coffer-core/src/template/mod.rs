@@ -148,7 +148,7 @@ impl TemplateManager {
             rootfs_path: output.rootfs_path,
             snapshot_state_path: snapshot_state,
             snapshot_mem_path: snapshot_mem,
-            kernel_args: kernel_args.unwrap_or_else(|| output.kernel_args),
+            kernel_args: kernel_args.unwrap_or(output.kernel_args),
             vcpus: 1,
             memory_mib: 256,
             metadata: HashMap::new(),

@@ -90,7 +90,7 @@ impl Runtime {
     #[instrument(skip(self), fields(template_id = template_id))]
     pub async fn create_cold(&self, template_id: &str) -> Result<SandboxHandle> {
         let template = self.templates.get(template_id)?;
-        let vm_id = format!("coffer-{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+        let vm_id = format!("coffer-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let vsock_path = self.vsock_dir.join(format!("{}.sock", vm_id));
 
         let tap = self.network.allocate_tap(&vm_id).await?;
@@ -197,6 +197,10 @@ impl Runtime {
 
     pub fn templates(&self) -> Arc<TemplateManager> {
         self.templates.clone()
+    }
+
+    pub fn pool(&self) -> Arc<WarmPool> {
+        self.pool.clone()
     }
 }
 
