@@ -50,12 +50,20 @@ echo "Creating rootfs tree at $ROOTFS_DIR..."
 rm -rf "$ROOTFS_DIR"
 mkdir -p "$ROOTFS_DIR"/{bin,sbin,dev,proc,sys,tmp,run,etc,usr/bin,usr/local/bin}
 
-# Create essential device nodes
-[ -e "$ROOTFS_DIR/dev/null" ] || mknod -m 666 "$ROOTFS_DIR/dev/null" c 1 3
-[ -e "$ROOTFS_DIR/dev/zero" ] || mknod -m 666 "$ROOTFS_DIR/dev/zero" c 1 5
-[ -e "$ROOTFS_DIR/dev/random" ] || mknod -m 666 "$ROOTFS_DIR/dev/random" c 1 8
-[ -e "$ROOTFS_DIR/dev/urandom" ] || mknod -m 666 "$ROOTFS_DIR/dev/urandom" c 1 9
-[ -e "$ROOTFS_DIR/dev/tty" ] || mknod -m 666 "$ROOTFS_DIR/dev/tty" c 5 0
+# Create essential device nodes (best-effort; guest devtmpfs will create them at boot)
+mknod_dev() {
+    local path="$1" type="$2" major="$3" minor="$4"
+    if [ ! -e "$path" ]; then
+        if ! mknod -m 666 "$path" "$type" "$major" "$minor" 2>/dev/null; then
+            echo "Warning: Cannot create $path (may need root or CAP_MKNOD). Guest devtmpfs will provide it at boot."
+        fi
+    fi
+}
+mknod_dev "$ROOTFS_DIR/dev/null"    c 1 3
+mknod_dev "$ROOTFS_DIR/dev/zero"    c 1 5
+mknod_dev "$ROOTFS_DIR/dev/random"  c 1 8
+mknod_dev "$ROOTFS_DIR/dev/urandom" c 1 9
+mknod_dev "$ROOTFS_DIR/dev/tty"     c 5 0
 
 # Symlinks for convenience
 ln -sf /proc/self/fd "$ROOTFS_DIR/dev/fd"
