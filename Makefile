@@ -106,7 +106,31 @@ uninstall:
 # Install sub-steps
 # ===================================================================
 install-bin: build
-	@install -d $(DESTDIR)$(BINDIR)
+	@# Check write permission before attempting install
+	@if [ ! -w "$(DESTDIR)$(BINDIR)" ] 2>/dev/null && [ -d "$(DESTDIR)$(BINDIR)" ]; then \
+		echo ""; \
+		echo "Error: No write permission to $(DESTDIR)$(BINDIR)."; \
+		echo ""; \
+		echo "To install system-wide (recommended):"; \
+		echo "  sudo make install"; \
+		echo ""; \
+		echo "To install for current user only:"; \
+		echo "  PREFIX=\$$HOME/.local make install"; \
+		echo ""; \
+		exit 1; \
+	fi
+	@install -d $(DESTDIR)$(BINDIR) 2>/dev/null || { \
+		echo ""; \
+		echo "Error: Cannot create $(DESTDIR)$(BINDIR). Permission denied."; \
+		echo ""; \
+		echo "To install system-wide (recommended):"; \
+		echo "  sudo make install"; \
+		echo ""; \
+		echo "To install for current user only:"; \
+		echo "  PREFIX=\$$HOME/.local make install"; \
+		echo ""; \
+		exit 1; \
+	}
 	install -m 755 target/release/coffer-cli $(DESTDIR)$(BINDIR)/coffer-cli
 	@echo "✓ Installed coffer-cli -> $(DESTDIR)$(BINDIR)/coffer-cli"
 
@@ -176,16 +200,24 @@ verify-data:
 install-template: verify-data
 	@echo ""
 	@echo "Building default alpine template..."
-	@if [ -f "$(BINDIR)/coffer-cli" ]; then \
-		CLI="$(BINDIR)/coffer-cli"; \
+	@if ! command -v skopeo >/dev/null 2>&1; then \
+		echo "⚠ skopeo not found. Skipping template build."; \
+		echo "  Install it first: make install-deps"; \
+	elif ! command -v umoci >/dev/null 2>&1; then \
+		echo "⚠ umoci not found. Skipping template build."; \
+		echo "  Install it first: make install-deps"; \
 	else \
-		CLI="cargo run --bin coffer-cli --release --"; \
-	fi; \
-	COFFER_FIRECRACKER_PATH=$(KERNEL_DIR)/firecracker \
-	COFFER_KERNEL_PATH=$(KERNEL_DIR)/vmlinux \
-	COFFER_AGENT_BIN=$(COFFER_HOME)/bin/coffer-agent \
-	$$CLI template build --name alpine docker.io/library/alpine:latest || \
-	(echo "⚠ Template build failed (may require root for KVM / network setup)." && exit 0)
+		if [ -f "$(BINDIR)/coffer-cli" ]; then \
+			CLI="$(BINDIR)/coffer-cli"; \
+		else \
+			CLI="cargo run --bin coffer-cli --release --"; \
+		fi; \
+		COFFER_FIRECRACKER_PATH=$(KERNEL_DIR)/firecracker \
+		COFFER_KERNEL_PATH=$(KERNEL_DIR)/vmlinux \
+		COFFER_AGENT_BIN=$(COFFER_HOME)/bin/coffer-agent \
+		$$CLI template build --name alpine docker.io/library/alpine:latest || \
+		(echo "⚠ Template build failed (may require root for KVM / network setup)." && exit 0); \
+	fi
 
 # ===================================================================
 # Install dependencies (auto-detect distro)
