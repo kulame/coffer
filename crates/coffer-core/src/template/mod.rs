@@ -185,8 +185,8 @@ impl TemplateManager {
         let vsock_path = self.template_dir.join(format!("snap-{}.vsock", vm_id));
 
         // Spawn temporary Firecracker.
-        let _child = spawn_firecracker(&self.firecracker_path, &socket_path, &log_path)?;
-        wait_for_socket(&socket_path, Duration::from_millis(2000)).await?;
+        let mut child = spawn_firecracker(&self.firecracker_path, &socket_path, &log_path)?;
+        wait_for_socket(&socket_path, Duration::from_millis(5000), &mut child).await?;
 
         let fc = FirecrackerClient::new(socket_path.clone());
 
@@ -304,22 +304,46 @@ fn spawn_firecracker(
         .arg("--log-path").arg(log_path)
         .arg("--level").arg("Warn")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()?;
     Ok(child)
 }
 
-async fn wait_for_socket(path: &Path, timeout: Duration) -> Result<()> {
+async fn wait_for_socket(
+    path: &Path,
+    timeout: Duration,
+    child: &mut tokio::process::Child,
+) -> Result<()> {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
         if path.exists() {
             return Ok(());
         }
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
+
+    // Collect stderr for debugging.
+    let mut stderr_msg = String::new();
+    if let Some(ref mut stderr) = child.stderr {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf).await;
+        if !buf.is_empty() {
+            stderr_msg = String::from_utf8_lossy(&buf).to_string();
+        }
+    }
+
+    let status = child.try_wait().ok().flatten();
+    let exit_info = match status {
+        Some(s) => format!("Firecracker exited with code {:?}", s.code()),
+        None => "Firecracker is still running but socket did not appear".into(),
+    };
+
     Err(CofferError::Firecracker(format!(
-        "Socket {} did not appear within {:?}",
+        "Socket {} did not appear within {:?}. {}. Stderr: {}",
         path.display(),
-        timeout
+        timeout,
+        exit_info,
+        if stderr_msg.is_empty() { "(empty)".into() } else { stderr_msg }
     )))
 }
