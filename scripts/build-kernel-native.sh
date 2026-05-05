@@ -137,7 +137,7 @@ echo "Applying Coffer kernel options..."
 
 # Accept defaults for any new options introduced by the config changes.
 echo "Running make olddefconfig..."
-yes "" | make oldconfig >/dev/null 2>&1
+make olddefconfig >/dev/null 2>&1
 
 # ------------------------------------------------------------------
 # Build
