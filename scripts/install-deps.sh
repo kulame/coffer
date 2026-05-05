@@ -17,12 +17,16 @@ log_error() { echo "[coffer-deps] ERROR: $*" >&2; }
 # ------------------------------------------------------------------
 detect_distro() {
     if [ -f /etc/os-release ]; then
+        # shellcheck source=/dev/null
         . /etc/os-release
-        echo "$ID"
+        echo "${ID:-unknown}"
+        return
     elif command -v lsb_release &>/dev/null; then
         lsb_release -si | tr '[:upper:]' '[:lower:]'
+        return
     else
         echo "unknown"
+        return
     fi
 }
 
@@ -84,6 +88,7 @@ install_opensuse() {
 # Main
 # ------------------------------------------------------------------
 DISTRO=$(detect_distro)
+ID="$DISTRO"
 log_info "Detected distribution: $DISTRO"
 
 case "$DISTRO" in
