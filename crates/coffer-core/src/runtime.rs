@@ -36,7 +36,7 @@ impl Runtime {
             config.template_dir.clone(),
             config.kernel_path.clone(),
             config.firecracker_path.clone(),
-        ));
+        ).with_agent_bin(config.agent_bin.clone()));
 
         let net_config = NetworkConfig {
             bridge_name: config.network.bridge_name.clone(),
@@ -44,7 +44,6 @@ impl Runtime {
             tap_prefix: config.network.tap_prefix.clone(),
         };
         let network = Arc::new(NetworkManager::new(net_config));
-        network.setup_bridge().await?;
 
         let pool = Arc::new(WarmPool::new(
             config.clone(),
@@ -91,7 +90,16 @@ impl Runtime {
     pub async fn create_cold(&self, template_id: &str) -> Result<SandboxHandle> {
         let template = self.templates.get(template_id)?;
         let vm_id = format!("coffer-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-        let vsock_path = self.vsock_dir.join(format!("{}.sock", vm_id));
+
+        let has_snapshot = template.snapshot_mem_path.exists()
+            && template.snapshot_state_path.exists()
+            && template.snapshot_vsock_path.exists();
+
+        let vsock_path = if has_snapshot {
+            template.snapshot_vsock_path.clone()
+        } else {
+            self.vsock_dir.join(format!("{}.sock", vm_id))
+        };
 
         let tap = self.network.allocate_tap(&vm_id).await?;
         let cid = NEXT_CID.fetch_add(1, Ordering::SeqCst) as u32;
@@ -114,38 +122,49 @@ impl Runtime {
             track_dirty_pages: true,
         }).await?;
 
-        // Set rootfs drive.
-        fc.add_drive("rootfs", &crate::firecracker::DriveConfig {
-            drive_id: "rootfs".into(),
-            path_on_host: template.rootfs_path.clone(),
-            is_root_device: true,
-            is_read_only: true,
-        }).await?;
-
-        // Set network interface.
-        fc.add_network_interface(&crate::firecracker::NetworkInterfaceConfig {
-            iface_id: "eth0".into(),
-            guest_mac: format!("02:00:00:{:02x}:{:02x}:{:02x}",
-                (cid >> 16) & 0xff, (cid >> 8) & 0xff, cid & 0xff),
-            host_dev_name: tap.clone(),
-        }).await?;
-
-        // Set vsock.
-        fc.add_vsock(&crate::firecracker::VsockConfig {
-            guest_cid: cid,
-            uds_path: vsock_path.clone(),
-        }).await?;
-
-        // Load snapshot if available.
-        if template.snapshot_mem_path.exists() && template.snapshot_state_path.exists() {
+        if has_snapshot {
+            // Snapshot was created without a network interface (create_snapshot
+            // does not call add_network_interface). Load the snapshot first,
+            // then attach the TAP device.
             fc.load_snapshot(&crate::firecracker::LoadSnapshotRequest {
                 snapshot_path: template.snapshot_state_path.clone(),
-                mem_backend: crate::firecracker::MemoryBackend::File {
+                mem_backend: crate::firecracker::MemBackendConfig {
+                    backend_type: "File".into(),
                     backend_path: template.snapshot_mem_path.clone(),
                 },
                 resume_vm: true,
             }).await?;
+
+            // Attach network interface (not present in snapshot).
+            fc.add_network_interface(&crate::firecracker::NetworkInterfaceConfig {
+                iface_id: "eth0".into(),
+                guest_mac: format!("02:00:00:{:02x}:{:02x}:{:02x}",
+                    (cid >> 16) & 0xff, (cid >> 8) & 0xff, cid & 0xff),
+                host_dev_name: tap.clone(),
+            }).await?;
         } else {
+            // Set rootfs drive.
+            fc.add_drive("rootfs", &crate::firecracker::DriveConfig {
+                drive_id: "rootfs".into(),
+                path_on_host: template.rootfs_path.clone(),
+                is_root_device: true,
+                is_read_only: true,
+            }).await?;
+
+            // Set network interface.
+            fc.add_network_interface(&crate::firecracker::NetworkInterfaceConfig {
+                iface_id: "eth0".into(),
+                guest_mac: format!("02:00:00:{:02x}:{:02x}:{:02x}",
+                    (cid >> 16) & 0xff, (cid >> 8) & 0xff, cid & 0xff),
+                host_dev_name: tap.clone(),
+            }).await?;
+
+            // Set vsock.
+            fc.add_vsock(&crate::firecracker::VsockConfig {
+                guest_cid: cid,
+                uds_path: vsock_path.clone(),
+            }).await?;
+
             // Boot from kernel.
             fc.set_kernel(&crate::firecracker::KernelConfig {
                 kernel_image_path: template.kernel_path.clone(),
@@ -172,7 +191,7 @@ impl Runtime {
             }
             if vsock_path.exists() {
                 // Try to ping.
-                if let Ok(mut client) = crate::protocol::VsockClient::connect(&vsock_path) {
+                if let Ok(mut client) = crate::protocol::VsockClient::connect(&vsock_path, coffer_protocol::COFFER_VSOCK_PORT) {
                     if client.ping().is_ok() {
                         break;
                     }
@@ -234,7 +253,7 @@ impl Sandbox {
         let env = env.clone();
 
         tokio::task::spawn_blocking(move || {
-            let mut client = crate::protocol::VsockClient::connect(&vsock)?;
+            let mut client = crate::protocol::VsockClient::connect(&vsock, coffer_protocol::COFFER_VSOCK_PORT)?;
             client.exec(cmd, env, None, None, Some(timeout_ms))
         })
         .await
@@ -254,7 +273,7 @@ impl Sandbox {
         };
 
         tokio::task::spawn_blocking(move || {
-            let mut client = crate::protocol::VsockClient::connect(&vsock)?;
+            let mut client = crate::protocol::VsockClient::connect(&vsock, coffer_protocol::COFFER_VSOCK_PORT)?;
             match client.call(&req)? {
                 coffer_protocol::AgentResponse::Ok { .. } => Ok(()),
                 coffer_protocol::AgentResponse::Error { message, code, .. } => {
@@ -281,7 +300,7 @@ impl Sandbox {
         };
 
         tokio::task::spawn_blocking(move || {
-            let mut client = crate::protocol::VsockClient::connect(&vsock)?;
+            let mut client = crate::protocol::VsockClient::connect(&vsock, coffer_protocol::COFFER_VSOCK_PORT)?;
             match client.call(&req)? {
                 coffer_protocol::AgentResponse::Ok { body: coffer_protocol::ResponseBody::Download { data }, .. } => {
                     Ok(data)
@@ -424,6 +443,8 @@ pub fn spawn_vm_process(
     } else {
         let socket_path = config.socket_dir.join(socket_name);
         let log_path = config.socket_dir.join(log_name);
+        // Firecracker v1.7+ requires the log file to exist before startup.
+        let _ = std::fs::File::create(&log_path);
         let child = Command::new(&config.firecracker_path)
             .arg("--api-sock").arg(&socket_path)
             .arg("--log-path").arg(&log_path)

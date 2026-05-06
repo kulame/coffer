@@ -12,6 +12,12 @@ use crate::error::{CofferError, Result};
 ///
 /// Firecracker vsock uses a Unix domain socket on the host side.
 /// The socket path is `vsock_uds_path` configured in the VM.
+///
+/// Firecracker 1.5+ vsock protocol:
+/// 1. Connect to the UDS at `vsock_uds_path`.
+/// 2. Send `CONNECT <port>\n`.
+/// 3. Read `OK <host_port>\n` acknowledgement.
+/// 4. Use the same socket for all subsequent communication.
 pub struct VsockClient {
     stream: StdUnixStream,
     read_buf: Vec<u8>,
@@ -19,10 +25,32 @@ pub struct VsockClient {
 
 impl VsockClient {
     /// Connect to the guest agent via the host-side vsock Unix socket.
-    pub fn connect(vsock_uds_path: &Path) -> Result<Self> {
-        let stream = StdUnixStream::connect(vsock_uds_path)?;
+    ///
+    /// Performs the Firecracker `CONNECT` handshake on `port`.
+    pub fn connect(vsock_uds_path: &Path, port: u32) -> Result<Self> {
+        let mut stream = StdUnixStream::connect(vsock_uds_path)?;
         stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
         stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
+
+        // Firecracker 1.5+ host-initiated vsock handshake.
+        write!(stream, "CONNECT {}\n", port)?;
+        stream.flush()?;
+
+        let mut ack = String::new();
+        let mut byte = [0u8; 1];
+        loop {
+            stream.read_exact(&mut byte)?;
+            if byte[0] == b'\n' {
+                break;
+            }
+            ack.push(byte[0] as char);
+        }
+        if !ack.starts_with("OK ") {
+            return Err(CofferError::AgentCommunication(format!(
+                "Firecracker vsock handshake failed: {}", ack
+            )));
+        }
+
         Ok(Self {
             stream,
             read_buf: Vec::with_capacity(4096),

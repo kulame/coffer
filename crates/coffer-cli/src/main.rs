@@ -105,6 +105,10 @@ struct RunArgs {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    // If the binary has cap_net_admin file capabilities, raise it into the
+    // ambient set so that child processes (ip, iptables) inherit it.
+    coffer_core::ensure_cap_net_admin_ambient();
+
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
@@ -530,6 +534,19 @@ async fn cmd_check() -> Result<()> {
     ok &= check("ip", check_cmd("ip", &["-V"]));
     ok &= check("iptables", check_cmd("iptables", &["--version"]));
 
+    // Network privileges (CAP_NET_ADMIN)
+    let has_net_admin = check_cap_net_admin();
+    if !has_net_admin {
+        println!("  [WARN] CAP_NET_ADMIN not available — network setup will require root");
+        println!("         To run without sudo:");
+        println!("           sudo setcap cap_net_admin+eip {}", config.firecracker_path.display());
+        println!("         Or pre-create the bridge as root:");
+        println!("           sudo ip link add {} type bridge && sudo ip link set {} up",
+            config.network.bridge_name, config.network.bridge_name);
+    } else {
+        println!("  [OK]   CAP_NET_ADMIN available");
+    }
+
     println!();
     if ok {
         println!("✓ All checks passed. Coffer is ready to use.");
@@ -588,6 +605,30 @@ fn check_cmd(cmd: &str, args: &[&str]) -> Result<()> {
         Ok(_) => anyhow::bail!("command exited with non-zero status"),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Check whether the current process has CAP_NET_ADMIN.
+/// Reads /proc/self/status and looks at the effective capability set.
+fn check_cap_net_admin() -> bool {
+    let contents = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let mut uid = None;
+    let mut cap_eff = None;
+    for line in contents.lines() {
+        if let Some(val) = line.strip_prefix("Uid:") {
+            uid = val.trim().split_whitespace().next().and_then(|s| s.parse::<u32>().ok());
+        }
+        if let Some(val) = line.strip_prefix("CapEff:") {
+            cap_eff = u64::from_str_radix(val.trim(), 16).ok();
+        }
+    }
+    if uid == Some(0) {
+        return true;
+    }
+    if let Some(caps) = cap_eff {
+        // CAP_NET_ADMIN = 12
+        return (caps & (1u64 << 12)) != 0;
+    }
+    false
 }
 
 // ===================================================================

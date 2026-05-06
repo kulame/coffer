@@ -43,3 +43,28 @@ pub use template::{Template, TemplateManager, TemplateSpec};
 pub mod proto {
     pub use coffer_protocol::*;
 }
+
+/// Attempt to raise CAP_NET_ADMIN into the ambient capability set.
+///
+/// When the coffer-cli binary has file capabilities (`cap_net_admin=eip`),
+/// the effective capability is present but is **not** automatically inherited
+/// by child processes launched via `exec`.  Raising the capability into the
+/// ambient set solves this, allowing external tools such as `ip` and
+/// `iptables` to run without `sudo`.
+pub fn ensure_cap_net_admin_ambient() {
+    const PR_CAP_AMBIENT: libc::c_int = 47;
+    const PR_CAP_AMBIENT_RAISE: libc::c_int = 2;
+    const CAP_NET_ADMIN: libc::c_int = 12;
+
+    // Safety: prctl with these arguments is a well-defined Linux syscall.
+    let rc = unsafe { libc::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, CAP_NET_ADMIN, 0, 0) };
+    if rc == -1 {
+        let err = std::io::Error::last_os_error();
+        // EINVAL → kernel too old for ambient caps.
+        // EPERM  → cap not in permitted/inheritable set (e.g. no file caps).
+        // Both are fine to ignore — the caller may be root or use sudo.
+        tracing::debug!("Could not raise CAP_NET_ADMIN ambient: {}", err);
+    } else {
+        tracing::debug!("Raised CAP_NET_ADMIN into ambient capability set");
+    }
+}

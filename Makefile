@@ -31,6 +31,13 @@ RUN_DIR ?= $(COFFER_HOME)/run
 FIRECRACKER_VERSION ?= 1.7.0
 FIRECRACKER_URL ?= https://github.com/firecracker-microvm/firecracker/releases/download/v$(FIRECRACKER_VERSION)/firecracker-v$(FIRECRACKER_VERSION)-$(ARCH).tgz
 
+# Default OCI image for the alpine template.
+# Override this if you are in a region with poor Docker Hub connectivity.
+# Verified mirrors (as of 2026-05):
+#   make template DEFAULT_IMAGE=m.daocloud.io/docker.io/library/alpine:latest
+#   make template DEFAULT_IMAGE=docker.1panel.live/library/alpine:latest
+DEFAULT_IMAGE ?= m.daocloud.io/docker.io/library/alpine:latest
+
 # Paths to native build scripts
 SCRIPT_DIR ?= $(PWD)/scripts
 
@@ -44,7 +51,8 @@ LOCAL_ROOTFS ?= rootfs-builder/output/rootfs.erofs
 .PHONY: all help install uninstall install-deps check-deps \
         firecracker kernel rootfs agent build \
         install-bin install-data install-template verify-data \
-        template test test-integration test-local check clean clean-all
+        template test test-integration test-local check clean clean-all \
+        setup-perms fix-perms
 
 # ===================================================================
 # Help
@@ -66,6 +74,9 @@ help:
 	@echo "  make rootfs         — Build minimal rootfs"
 	@echo "  make template       — Build default alpine template"
 	@echo ""
+	@echo "Mirror override (for poor Docker Hub connectivity):"
+	@echo "  make template DEFAULT_IMAGE=m.daocloud.io/docker.io/library/alpine:latest"
+	@echo ""
 	@echo "Development:"
 	@echo "  make check          — cargo check"
 	@echo "  make test           — Run unit tests"
@@ -76,7 +87,7 @@ help:
 # ===================================================================
 # Full installation
 # ===================================================================
-install: install-deps build install-bin verify-data install-template
+install: install-deps build install-bin setup-perms verify-data install-template
 	@echo ""
 	@echo "========================================"
 	@echo "✓ Coffer installed successfully!"
@@ -133,6 +144,67 @@ install-bin: build
 	}
 	install -m 755 target/release/coffer-cli $(DESTDIR)$(BINDIR)/coffer-cli
 	@echo "✓ Installed coffer-cli -> $(DESTDIR)$(BINDIR)/coffer-cli"
+
+setup-perms:
+	@echo "Setting up runtime permissions..."
+	@# Ensure coffer-cli has CAP_NET_ADMIN
+	@if command -v setcap >/dev/null 2>&1 && [ -f $(DESTDIR)$(BINDIR)/coffer-cli ]; then \
+		if getcap $(DESTDIR)$(BINDIR)/coffer-cli 2>/dev/null | grep -q cap_net_admin; then \
+			echo "✓ coffer-cli already has CAP_NET_ADMIN"; \
+		else \
+			if setcap cap_net_admin+eip $(DESTDIR)$(BINDIR)/coffer-cli 2>/dev/null; then \
+				echo "✓ Granted CAP_NET_ADMIN to coffer-cli"; \
+			elif sudo -n setcap cap_net_admin+eip $(DESTDIR)$(BINDIR)/coffer-cli 2>/dev/null; then \
+				echo "✓ Granted CAP_NET_ADMIN to coffer-cli (via sudo)"; \
+			else \
+				echo ""; \
+				echo "⚠ Failed to set CAP_NET_ADMIN on $(DESTDIR)$(BINDIR)/coffer-cli"; \
+				echo "  Fix it manually with:"; \
+				echo "    sudo setcap cap_net_admin+eip $(DESTDIR)$(BINDIR)/coffer-cli"; \
+				echo "  Or run:"; \
+				echo "    make fix-perms"; \
+				echo ""; \
+			fi; \
+		fi \
+	elif [ -f $(DESTDIR)$(BINDIR)/coffer-cli ]; then \
+		echo "⚠ setcap not found. Install libcap2-bin to set file capabilities."; \
+	fi
+	@# Ensure /dev/kvm is accessible
+	@if [ -c /dev/kvm ]; then \
+		KVM_PERMS=$$(stat -c '%a' /dev/kvm 2>/dev/null || echo 0); \
+		if [ "$$KVM_PERMS" = "666" ] || groups | grep -qw kvm; then \
+			echo "✓ /dev/kvm is accessible"; \
+		else \
+			if chmod 666 /dev/kvm 2>/dev/null; then \
+				echo "✓ Set /dev/kvm permissions to 666"; \
+			elif sudo -n chmod 666 /dev/kvm 2>/dev/null; then \
+				echo "✓ Set /dev/kvm permissions to 666 (via sudo)"; \
+			else \
+				echo "⚠ Cannot modify /dev/kvm (try: sudo chmod 666 /dev/kvm)"; \
+			fi; \
+		fi \
+	else \
+		echo "⚠ /dev/kvm not found. KVM may not be available."; \
+	fi
+
+fix-perms:
+	@echo "Fixing runtime permissions..."
+	@if [ -f $(DESTDIR)$(BINDIR)/coffer-cli ]; then \
+		if sudo setcap cap_net_admin+eip $(DESTDIR)$(BINDIR)/coffer-cli; then \
+			echo "✓ Granted CAP_NET_ADMIN to coffer-cli"; \
+		else \
+			echo "⚠ Failed to set CAP_NET_ADMIN (setcap requires root)"; \
+		fi; \
+	else \
+		echo "⚠ coffer-cli not found at $(DESTDIR)$(BINDIR)/coffer-cli"; \
+	fi
+	@if [ -c /dev/kvm ]; then \
+		if sudo chmod 666 /dev/kvm; then \
+			echo "✓ Set /dev/kvm permissions to 666"; \
+		else \
+			echo "⚠ Failed to modify /dev/kvm"; \
+		fi; \
+	fi
 
 verify-data:
 	@echo "Verifying runtime data..."
@@ -215,7 +287,7 @@ install-template: verify-data
 		COFFER_FIRECRACKER_PATH=$(KERNEL_DIR)/firecracker \
 		COFFER_KERNEL_PATH=$(KERNEL_DIR)/vmlinux \
 		COFFER_AGENT_BIN=$(COFFER_HOME)/bin/coffer-agent \
-		$$CLI template build --name alpine docker.io/library/alpine:latest || \
+		$$CLI template build --name alpine $(DEFAULT_IMAGE) || \
 		(echo "⚠ Template build failed (may require root for KVM / network setup)." && exit 0); \
 	fi
 
@@ -289,7 +361,7 @@ rootfs:
 # ===================================================================
 # Full template (rootfs + snapshot)
 # ===================================================================
-template: rootfs kernel firecracker build install-bin
+template: rootfs kernel firecracker build install-bin setup-perms
 	@echo "Creating template snapshot..."
 	@if [ -f "$(BINDIR)/coffer-cli" ]; then \
 		CLI="$(BINDIR)/coffer-cli"; \
@@ -299,7 +371,7 @@ template: rootfs kernel firecracker build install-bin
 	COFFER_FIRECRACKER_PATH=$(KERNEL_DIR)/firecracker \
 	COFFER_KERNEL_PATH=$(KERNEL_DIR)/vmlinux \
 	COFFER_AGENT_BIN=$(COFFER_HOME)/bin/coffer-agent \
-	$$CLI template build --name alpine docker.io/library/alpine:latest
+	$$CLI template build --name alpine $(DEFAULT_IMAGE)
 
 # ===================================================================
 # Rust build & test
@@ -309,6 +381,8 @@ check:
 
 build:
 	cargo build --workspace --release
+	# Rebuild coffer-agent as a fully-static binary so it runs on musl-based guests (Alpine).
+	cargo rustc --release -p coffer-agent --bin coffer-agent -- -C target-feature=+crt-static
 
 test:
 	cargo test --workspace

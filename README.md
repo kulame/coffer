@@ -111,34 +111,200 @@ make template       # 创建热启动快照
 
 ### 3. 使用 CLI
 
-Coffer 提供了命令行工具，方便快速进行沙箱测试：
+`coffer-cli` 是 Coffer 的命令行入口，提供沙箱生命周期管理、模板操作和系统诊断等功能。
+
+#### 命令总览
+
+| 命令 | 说明 |
+|------|------|
+| `coffer-cli check` | 检查系统就绪状态 |
+| `coffer-cli template <子命令>` | 管理 VM 模板（构建、列出、查看、删除） |
+| `coffer-cli run [选项] -- <命令>` | 在沙箱中运行命令（自动获取 → 执行 → 释放） |
+| `coffer-cli pool-status` | 查看热池状态 |
+| `coffer-cli --version` | 显示版本信息 |
+
+#### `check` — 系统就绪检查
+
+在安装完成后或遇到异常时运行，验证所有依赖是否就绪：
 
 ```bash
-# 检查系统就绪状态
 coffer-cli check
+```
 
-# 列出可用模板
+检查项包括：
+- Firecracker / Jailer / 内核 / Agent 二进制文件是否存在且可执行
+- `/dev/kvm` 是否可读写（会提示如何修复权限）
+- 模板目录是否存在
+- 外部工具链：`mkfs.erofs`、`skopeo`、`umoci`、`ip`、`iptables`
+- 网络权限（`CAP_NET_ADMIN`，缺失时提示 `setcap` 或预创建网桥）
+
+#### `template` — 模板管理
+
+模板是沙箱运行的基础，包含根文件系统、内核和内存快照。
+
+**构建模板**（从 OCI 镜像）：
+```bash
+# 基础用法
+coffer-cli template build --name alpine docker.io/library/alpine:latest
+
+# 自定义内核启动参数
+coffer-cli template build --name alpine \
+  --kernel-args "console=ttyS0 reboot=k panic=1" \
+  docker.io/library/alpine:latest
+```
+
+构建流程：`skopeo` 拉取 → `umoci unpack` → `mkfs.erofs` 打包 → 启动临时 VM → 生成 Firecracker 快照。
+
+**列出模板**：
+```bash
 coffer-cli template list
+```
 
-# 快速运行一条命令（获取 → 执行 → 自动释放）
+输出示例：
+```
+ID                           NAME             VCPUS   MEM(MiB)
+----------------------------------------------------------------
+0192a1f3...e4b2             alpine               1        256
+```
+
+**查看模板详情**：
+```bash
+coffer-cli template info <ID>
+```
+
+**删除模板**：
+```bash
+# 交互式确认
+coffer-cli template rm <ID>
+
+# 跳过确认
+coffer-cli template rm <ID> --yes
+```
+
+#### `run` — 在沙箱中运行命令
+
+`run` 是 CLI 的核心命令，自动完成「获取沙箱 → 上传文件 → 执行命令 → 下载文件 → 归还热池」的完整生命周期。
+
+**语法**：
+```bash
+coffer-cli run --template <ID> [选项] -- <命令> [参数...]
+```
+
+**选项**：
+
+| 选项 | 简写 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--template <ID>` | `-t` | 必填 | 使用的模板 ID |
+| `--env KEY=VALUE` | `-e` | 无 | 设置环境变量（可多次指定） |
+| `--timeout <毫秒>` | | `30000` | 命令执行超时 |
+| `--upload LOCAL:REMOTE` | | 无 | 上传文件到沙箱（可多次指定） |
+| `--download REMOTE:LOCAL` | | 无 | 从沙箱下载文件（可多次指定） |
+| `--json` | | `false` | 以 JSON 格式输出结果 |
+| `--` | | | 分隔 CLI 选项与待执行的命令 |
+
+**基础示例**：
+```bash
+# 执行单条命令
 coffer-cli run --template alpine -- echo "hello from MicroVM"
 
-# 带文件上传/下载和环境变量的运行
-ccoffer-cli run --template alpine \
+# 执行带参数的 shell 命令
+coffer-cli run --template alpine -- /bin/sh -c "uname -a && cat /etc/os-release"
+
+# 默认进入 /bin/sh（未提供命令时）
+coffer-cli run --template alpine
+```
+
+**带环境变量**：
+```bash
+coffer-cli run --template alpine \
+  -e FOO=bar \
+  -e API_KEY=sk-xxxx \
+  -- /bin/sh -c 'echo $FOO $API_KEY'
+```
+
+**文件上传与下载**：
+```bash
+# 上传本地脚本并在沙箱中执行
+coffer-cli run --template alpine \
   --upload ./script.sh:/tmp/script.sh \
-  --env FOO=bar \
   -- /bin/sh /tmp/script.sh
 
-# 查看热池状态
+# 上传输入文件，执行处理，下载结果
+coffer-cli run --template alpine \
+  --upload ./data.json:/tmp/data.json \
+  --download /tmp/result.json:./result.json \
+  -- python3 /tmp/process.py
+```
+
+**JSON 输出**（适合脚本集成）：
+```bash
+coffer-cli run --template alpine --json -- echo hello
+```
+
+输出示例：
+```json
+{
+  "vm_id": "0192a1f3-...",
+  "template_id": "alpine",
+  "command": ["echo", "hello"],
+  "exit_code": 0,
+  "stdout": "hello\n",
+  "stderr": "",
+  "duration_ms": 2,
+  "acquire_ms": 28,
+  "exec_ms": 3
+}
+```
+
+字段说明：
+- `vm_id`：本次分配的虚拟机 ID
+- `exit_code`：沙箱内命令的退出码
+- `stdout` / `stderr`：标准输出和标准错误
+- `duration_ms`：命令在客户机内的实际执行耗时
+- `acquire_ms`：从热池获取沙箱的耗时（热启动通常 <50ms）
+- `exec_ms`：宿主机侧命令执行总耗时
+
+**退出码**：
+- `run` 命令成功时，CLI 进程退出码与沙箱内命令的退出码一致，便于 Shell 脚本直接判断结果。
+- 发生系统错误（如模板不存在、KVM 不可用、网络故障）时，退出码为 `1`。
+
+#### `pool-status` — 查看热池状态
+
+```bash
 coffer-cli pool-status
 ```
 
-CLI 路径支持通过环境变量覆盖：
+输出示例：
+```
+Warm Pool Status
+----------------
+In-use sandboxes: 3
+Available sandboxes by template:
+  TEMPLATE                       COUNT
+  ----------------------------------------
+  alpine                             4
+  ubuntu                             2
+```
+
+#### 环境变量
+
+可通过环境变量覆盖默认路径配置：
+
+| 环境变量 | 说明 | 默认值 |
+|----------|------|--------|
+| `COFFER_FIRECRACKER_PATH` | Firecracker 可执行文件路径 | `~/.coffer/kernel/firecracker` |
+| `COFFER_KERNEL_PATH` | 客户机内核镜像路径 | `~/.coffer/kernel/vmlinux` |
+| `COFFER_TEMPLATE_DIR` | 模板存储目录 | `~/.coffer/templates` |
+| `COFFER_SOCKET_DIR` | Unix Socket 运行时目录 | `~/.coffer/run` |
+| `COFFER_AGENT_BIN` | Agent 二进制文件路径 | `~/.coffer/bin/coffer-agent` |
+
+使用示例：
 ```bash
-export COFFER_FIRECRACKER_PATH=~/.coffer/kernel/firecracker
-export COFFER_KERNEL_PATH=~/.coffer/kernel/vmlinux
-export COFFER_TEMPLATE_DIR=~/.coffer/templates
-export COFFER_AGENT_BIN=~/.coffer/bin/coffer-agent
+export COFFER_TEMPLATE_DIR=/data/coffer/templates
+export COFFER_FIRECRACKER_PATH=/opt/firecracker/firecracker
+
+coffer-cli template list
+coffer-cli run --template alpine -- uname -a
 ```
 
 ### 4. 作为库使用

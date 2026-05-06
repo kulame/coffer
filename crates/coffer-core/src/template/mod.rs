@@ -40,6 +40,8 @@ pub struct Template {
     pub rootfs_path: PathBuf,
     pub snapshot_state_path: PathBuf,
     pub snapshot_mem_path: PathBuf,
+    /// Vsock UDS path that was configured when the snapshot was created.
+    pub snapshot_vsock_path: PathBuf,
     pub kernel_args: String,
     pub vcpus: u32,
     pub memory_mib: u32,
@@ -127,11 +129,17 @@ impl TemplateManager {
         if let Some(ref agent) = self.agent_bin {
             builder = builder.with_agent_bin(agent.clone());
         }
-        let output = builder.build().await?;
+        let mut output = builder.build().await?;
+
+        // Move rootfs to template root for easier discovery by load_all.
+        let rootfs_dest = dir.join("rootfs.erofs");
+        std::fs::rename(&output.rootfs_path, &rootfs_dest)?;
+        output.rootfs_path = rootfs_dest;
 
         // 2. Create snapshot by booting a temporary VM.
         let snapshot_state = dir.join("snapshot.state");
         let snapshot_mem = dir.join("snapshot.mem");
+        let snapshot_vsock = dir.join("vsock.sock");
         self.create_snapshot(
             &id,
             &output.kernel_path,
@@ -139,6 +147,7 @@ impl TemplateManager {
             &output.kernel_args,
             &snapshot_state,
             &snapshot_mem,
+            &snapshot_vsock,
         ).await?;
 
         let template = Template {
@@ -148,7 +157,8 @@ impl TemplateManager {
             rootfs_path: output.rootfs_path,
             snapshot_state_path: snapshot_state,
             snapshot_mem_path: snapshot_mem,
-            kernel_args: kernel_args.unwrap_or(output.kernel_args),
+            snapshot_vsock_path: snapshot_vsock,
+            kernel_args: output.kernel_args,
             vcpus: 1,
             memory_mib: 256,
             metadata: HashMap::new(),
@@ -177,12 +187,13 @@ impl TemplateManager {
         kernel_args: &str,
         snapshot_state_path: &Path,
         snapshot_mem_path: &Path,
+        snapshot_vsock_path: &Path,
     ) -> Result<()> {
         info!(%vm_id, "Creating snapshot");
 
         let socket_path = self.template_dir.join(format!("snap-{}.sock", vm_id));
         let log_path = self.template_dir.join(format!("snap-{}.log", vm_id));
-        let vsock_path = self.template_dir.join(format!("snap-{}.vsock", vm_id));
+        let vsock_path = snapshot_vsock_path.to_path_buf();
 
         // Spawn temporary Firecracker.
         let mut child = spawn_firecracker(&self.firecracker_path, &socket_path, &log_path)?;
@@ -210,6 +221,10 @@ impl TemplateManager {
             is_read_only: true,
         }).await?;
 
+        // Ensure parent directory exists for vsock.
+        if let Some(parent) = vsock_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         fc.add_vsock(&VsockConfig {
             guest_cid: 100,
             uds_path: vsock_path.clone(),
@@ -225,9 +240,8 @@ impl TemplateManager {
                 let _ = fc.shutdown().await;
                 return Err(CofferError::AgentNotReady(vm_id.into()));
             }
-            let vsock_conn = format!("{}_1024", vsock_path.display());
-            if Path::new(&vsock_conn).exists() {
-                if let Ok(mut client) = crate::protocol::VsockClient::connect(Path::new(&vsock_conn)) {
+            if vsock_path.exists() {
+                if let Ok(mut client) = crate::protocol::VsockClient::connect(&vsock_path, coffer_protocol::COFFER_VSOCK_PORT) {
                     if client.ping().is_ok() {
                         break;
                     }
@@ -267,19 +281,21 @@ impl TemplateManager {
             let path = entry.path();
             if path.is_dir() {
                 let id = path.file_name().unwrap().to_string_lossy().to_string();
-                let kernel = path.join("kernel");
+                let _kernel = path.join("kernel");
                 let rootfs = path.join("rootfs.erofs");
                 let snapshot_state = path.join("snapshot.state");
                 let snapshot_mem = path.join("snapshot.mem");
 
-                if kernel.exists() && rootfs.exists() && snapshot_state.exists() && snapshot_mem.exists() {
+                if rootfs.exists() && snapshot_state.exists() && snapshot_mem.exists() {
+                    let snapshot_vsock = path.join("vsock.sock");
                     let template = Template {
                         id: id.clone(),
                         name: id.clone(),
-                        kernel_path: kernel,
+                        kernel_path: self.kernel_path.clone(),
                         rootfs_path: rootfs,
                         snapshot_state_path: snapshot_state,
                         snapshot_mem_path: snapshot_mem,
+                        snapshot_vsock_path: snapshot_vsock,
                         kernel_args: "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/coffer-init".into(),
                         vcpus: 1,
                         memory_mib: 256,
@@ -306,12 +322,16 @@ fn spawn_firecracker(
     if !log_path.exists() {
         std::fs::File::create(log_path)?;
     }
+    let stderr_path = log_path.with_extension("stderr");
+    let stderr_file = std::fs::File::create(&stderr_path)?;
+    let stdout_path = log_path.with_extension("stdout");
+    let stdout_file = std::fs::File::create(&stdout_path)?;
     let child = Command::new(fc_path)
         .arg("--api-sock").arg(socket_path)
         .arg("--log-path").arg(log_path)
         .arg("--level").arg("Warn")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(stdout_file))
+        .stderr(std::process::Stdio::from(stderr_file))
         .spawn()?;
     Ok(child)
 }

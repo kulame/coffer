@@ -210,17 +210,18 @@ struct Action {
 #[derive(Serialize, Debug)]
 pub struct LoadSnapshotRequest {
     pub snapshot_path: PathBuf,
-    #[serde(flatten)]
-    pub mem_backend: MemoryBackend,
+    pub mem_backend: MemBackendConfig,
     pub resume_vm: bool,
 }
 
 #[derive(Serialize, Debug)]
-#[serde(tag = "mem_backend_type")]
-pub enum MemoryBackend {
-    #[serde(rename = "File")]
-    File { backend_path: PathBuf },
+pub struct MemBackendConfig {
+    pub backend_type: String,
+    pub backend_path: PathBuf,
 }
+
+/// Deprecated: use `MemBackendConfig` directly.
+pub type MemoryBackend = MemBackendConfig;
 
 #[derive(Serialize, Debug)]
 pub struct CreateSnapshotRequest {

@@ -62,7 +62,7 @@ impl ImageBuilder {
     /// 2. umoci unpack
     /// 3. mkfs.erofs
     /// 4. inject coffer-init (overlay) + agentlet binary
-    pub async fn build(self) -> Result<BuildOutput> {
+    pub async fn build(mut self) -> Result<BuildOutput> {
         std::fs::create_dir_all(&self.work_dir)?;
 
         info!(image = %self.image, work_dir = %self.work_dir.display(), "Starting image build");
@@ -75,6 +75,9 @@ impl ImageBuilder {
 
         // 3. Inject overlay init and agent binary.
         self.inject_overlay_init().await?;
+        if self.enable_overlay && !self.kernel_args.contains("init=") {
+            self.kernel_args.push_str(" init=/sbin/coffer-init");
+        }
         self.inject_agent().await?;
 
         // 4. Build EROFS image.
@@ -119,8 +122,8 @@ impl ImageBuilder {
 
     async fn unpack_rootfs(&self) -> Result<()> {
         let oci_dir = self.work_dir.join("oci");
-        let rootfs_dir = self.work_dir.join("rootfs");
-        std::fs::create_dir_all(&rootfs_dir)?;
+        let unpack_dir = self.work_dir.join("rootfs");
+        std::fs::create_dir_all(&unpack_dir)?;
 
         info!("Unpacking OCI image with umoci");
 
@@ -131,7 +134,7 @@ impl ImageBuilder {
             "--rootless",
             "--image",
             &format!("{}:latest", oci_dir.display()),
-            &rootfs_dir.display().to_string(),
+            &unpack_dir.display().to_string(),
         ]);
 
         let status = cmd.status().await.map_err(|e| {
@@ -152,7 +155,7 @@ impl ImageBuilder {
                     "--rootless",
                     "--image",
                     &format!("{}:latest", oci_dir.display()),
-                    &rootfs_dir.display().to_string(),
+                    &unpack_dir.display().to_string(),
                 ])
                 .status()
                 .await
@@ -175,7 +178,7 @@ impl ImageBuilder {
     }
 
     async fn create_erofs(&self) -> Result<()> {
-        let rootfs_dir = self.work_dir.join("rootfs");
+        let rootfs_dir = self.work_dir.join("rootfs").join("rootfs");
         let erofs_path = self.work_dir.join("rootfs.erofs");
 
         info!("Creating EROFS image with mkfs.erofs");
@@ -206,7 +209,7 @@ impl ImageBuilder {
             return Ok(());
         }
 
-        let rootfs_dir = self.work_dir.join("rootfs");
+        let rootfs_dir = self.work_dir.join("rootfs").join("rootfs");
         let init_path = rootfs_dir.join("sbin/coffer-init");
         std::fs::create_dir_all(init_path.parent().unwrap())?;
 
@@ -219,20 +222,35 @@ mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sys /sys 2>/dev/null
 mount -t devtmpfs dev /dev 2>/dev/null
 
-mkdir -p /newroot/overlay/upper /newroot/overlay/work
-mount -t tmpfs -o size=128M tmpfs /newroot/overlay
-mount -t overlay overlay -o lowerdir=/,upperdir=/newroot/overlay/upper,workdir=/newroot/overlay/work /newroot
+# EROFS is read-only, so we use a tmpfs on /tmp to build the overlay tree.
+mount -t tmpfs -o size=128M tmpfs /tmp
+mkdir -p /tmp/newroot/overlay/upper /tmp/newroot/overlay/work
+mount -t overlay overlay -o lowerdir=/,upperdir=/tmp/newroot/overlay/upper,workdir=/tmp/newroot/overlay/work /tmp/newroot
 
-cd /newroot
-mkdir -p oldroot
-pivot_root . oldroot
+mkdir -p /tmp/newroot/oldroot
+pivot_root /tmp/newroot /tmp/newroot/oldroot
+cd /
 
-# Move essential virtual filesystems
+# Move essential virtual filesystems into the new root.
 mount --move /oldroot/proc /proc 2>/dev/null
 mount --move /oldroot/sys /sys 2>/dev/null
 mount --move /oldroot/dev /dev 2>/dev/null
 
-exec chroot . /sbin/init "$@"
+# Start coffer-agent in the background so the host can communicate with the guest.
+if [ -x /tmp/test_vsock ]; then
+    /tmp/test_vsock &
+    sleep 2
+fi
+if [ -x /usr/local/bin/coffer-agent ]; then
+    /usr/local/bin/coffer-agent &
+fi
+
+# Launch the image's init system if present; otherwise keep the agent as PID 1.
+if [ -x /sbin/init ]; then
+    exec /sbin/init "$@"
+else
+    wait
+fi
 "#;
 
         tokio::fs::write(&init_path, init_script).await?;
@@ -259,12 +277,13 @@ exec chroot . /sbin/init "$@"
             return Ok(());
         }
 
-        let rootfs_dir = self.work_dir.join("rootfs");
+        let rootfs_dir = self.work_dir.join("rootfs").join("rootfs");
         let target = rootfs_dir.join("usr/local/bin/coffer-agent");
         std::fs::create_dir_all(target.parent().unwrap())?;
 
         info!(src = %agent_bin.display(), dst = %target.display(), "Injecting agent binary");
         tokio::fs::copy(agent_bin, target).await?;
+
         Ok(())
     }
 }

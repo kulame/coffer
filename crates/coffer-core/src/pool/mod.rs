@@ -10,7 +10,7 @@ use tokio::time::{interval, Duration};
 use tracing::{debug, info, warn};
 
 use crate::config::RuntimeConfig;
-use crate::firecracker::{FirecrackerClient, MachineConfig, DriveConfig, NetworkInterfaceConfig, VsockConfig, LoadSnapshotRequest, MemoryBackend};
+use crate::firecracker::{FirecrackerClient, MachineConfig, DriveConfig, NetworkInterfaceConfig, VsockConfig, LoadSnapshotRequest};
 use crate::net::NetworkManager;
 use crate::template::TemplateManager;
 
@@ -160,7 +160,16 @@ async fn warm_one(
 ) -> crate::error::Result<()> {
     let template = templates.get(template_id)?;
     let vm_id = format!("coffer-pool-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-    let vsock_path = config.socket_dir.join("vsock").join(format!("{}.sock", vm_id));
+
+    let has_snapshot = template.snapshot_mem_path.exists()
+        && template.snapshot_state_path.exists()
+        && template.snapshot_vsock_path.exists();
+
+    let vsock_path = if has_snapshot {
+        template.snapshot_vsock_path.clone()
+    } else {
+        config.socket_dir.join("vsock").join(format!("{}.sock", vm_id))
+    };
 
     let tap = network.allocate_tap(&vm_id).await?;
     let cid = NEXT_CID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -182,35 +191,43 @@ async fn warm_one(
         track_dirty_pages: true,
     }).await?;
 
-    fc.add_drive("rootfs", &DriveConfig {
-        drive_id: "rootfs".into(),
-        path_on_host: template.rootfs_path.clone(),
-        is_root_device: true,
-        is_read_only: true,
-    }).await?;
-
-    fc.add_network_interface(&NetworkInterfaceConfig {
-        iface_id: "eth0".into(),
-        guest_mac: format!("02:00:00:{:02x}:{:02x}:{:02x}",
-            (cid >> 16) & 0xff, (cid >> 8) & 0xff, cid & 0xff),
-        host_dev_name: tap,
-    }).await?;
-
-    fc.add_vsock(&VsockConfig {
-        guest_cid: cid,
-        uds_path: vsock_path.clone(),
-    }).await?;
-
-    // Load snapshot or boot.
-    if template.snapshot_mem_path.exists() && template.snapshot_state_path.exists() {
+    if has_snapshot {
+        // Snapshot was created without a network interface. Load first, then attach TAP.
         fc.load_snapshot(&LoadSnapshotRequest {
             snapshot_path: template.snapshot_state_path.clone(),
-            mem_backend: MemoryBackend::File {
+            mem_backend: crate::firecracker::MemBackendConfig {
+                backend_type: "File".into(),
                 backend_path: template.snapshot_mem_path.clone(),
             },
             resume_vm: false,
         }).await?;
+
+        fc.add_network_interface(&NetworkInterfaceConfig {
+            iface_id: "eth0".into(),
+            guest_mac: format!("02:00:00:{:02x}:{:02x}:{:02x}",
+                (cid >> 16) & 0xff, (cid >> 8) & 0xff, cid & 0xff),
+            host_dev_name: tap,
+        }).await?;
     } else {
+        fc.add_drive("rootfs", &DriveConfig {
+            drive_id: "rootfs".into(),
+            path_on_host: template.rootfs_path.clone(),
+            is_root_device: true,
+            is_read_only: true,
+        }).await?;
+
+        fc.add_network_interface(&NetworkInterfaceConfig {
+            iface_id: "eth0".into(),
+            guest_mac: format!("02:00:00:{:02x}:{:02x}:{:02x}",
+                (cid >> 16) & 0xff, (cid >> 8) & 0xff, cid & 0xff),
+            host_dev_name: tap,
+        }).await?;
+
+        fc.add_vsock(&VsockConfig {
+            guest_cid: cid,
+            uds_path: vsock_path.clone(),
+        }).await?;
+
         fc.set_kernel(&crate::firecracker::KernelConfig {
             kernel_image_path: template.kernel_path.clone(),
             boot_args: template.kernel_args.clone(),
@@ -224,7 +241,7 @@ async fn warm_one(
                 return Err(crate::error::CofferError::AgentNotReady(vm_id));
             }
             if vsock_path.exists() {
-                if let Ok(mut client) = crate::protocol::VsockClient::connect(&vsock_path) {
+                if let Ok(mut client) = crate::protocol::VsockClient::connect(&vsock_path, coffer_protocol::COFFER_VSOCK_PORT) {
                     if client.ping().is_ok() {
                         break;
                     }

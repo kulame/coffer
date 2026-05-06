@@ -23,5 +23,7 @@ coffer-protocol = { path = "../coffer-protocol" }
 # Utilities
 dirs = "5.0"
 
+libc = "0.2"
+
 [dev-dependencies]
 tokio-test = "0.4"
