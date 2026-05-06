@@ -31,11 +31,17 @@ enum Commands {
     /// Run a command inside a sandbox (acquire → exec → release)
     Run(RunArgs),
 
+    /// Open an interactive shell inside a sandbox
+    Shell(ShellArgs),
+
     /// Show warm pool status
     PoolStatus,
 
     /// Check system readiness for running Coffer
     Check,
+
+    /// Show detailed version information (includes git commit and recent log)
+    Version,
 }
 
 #[derive(Subcommand)]
@@ -99,6 +105,25 @@ struct RunArgs {
     cmd: Vec<String>,
 }
 
+#[derive(Parser, Debug, Clone)]
+struct ShellArgs {
+    /// Template ID to use
+    #[arg(long, short)]
+    template: String,
+
+    /// Shell to run (default: /bin/sh)
+    #[arg(long, short, default_value = "/bin/sh")]
+    shell: String,
+
+    /// Working directory inside the sandbox
+    #[arg(long, short)]
+    working_dir: Option<String>,
+
+    /// Environment variables (KEY=VALUE)
+    #[arg(long, short, value_parser = parse_key_val)]
+    env: Vec<(String, String)>,
+}
+
 // ===================================================================
 // Entry point
 // ===================================================================
@@ -146,12 +171,17 @@ async fn run_cli(cli: Cli) -> Result<i32> {
             }
         },
         Commands::Run(args) => cmd_run(args).await,
+        Commands::Shell(args) => cmd_shell(args).await,
         Commands::PoolStatus => {
             cmd_pool_status().await?;
             Ok(0)
         }
         Commands::Check => {
             cmd_check().await?;
+            Ok(0)
+        }
+        Commands::Version => {
+            cmd_version();
             Ok(0)
         }
     }
@@ -424,6 +454,45 @@ async fn cmd_run(args: RunArgs) -> Result<i32> {
 }
 
 // ===================================================================
+// Shell command
+// ===================================================================
+
+async fn cmd_shell(args: ShellArgs) -> Result<i32> {
+    let config = build_config();
+    let runtime = Runtime::new(config)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to initialize runtime: {}", e))?;
+
+    let template_id = args.template;
+    let shell = args.shell;
+
+    eprintln!("Acquiring sandbox (template: {}) ... ", template_id);
+    let handle = runtime
+        .acquire(&template_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let vm_id = handle.vm_id().to_string();
+    eprintln!("{}", vm_id);
+
+    let sandbox = handle.sandbox();
+
+    let env: HashMap<String, String> = args.env.into_iter().collect();
+
+    eprintln!("Starting interactive shell ({}). Press Ctrl+D or type 'exit' to quit.", shell);
+
+    let shell_start = std::time::Instant::now();
+    let exit_code = sandbox
+        .exec_interactive(&[&shell], &env, args.working_dir)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let shell_duration = shell_start.elapsed();
+    eprintln!("Shell exited with code {} after {:?}", exit_code, shell_duration);
+
+    eprintln!("\nSandbox {} released to warm pool.", vm_id);
+    Ok(exit_code)
+}
+
+// ===================================================================
 // Pool status
 // ===================================================================
 
@@ -629,6 +698,24 @@ fn check_cap_net_admin() -> bool {
         return (caps & (1u64 << 12)) != 0;
     }
     false
+}
+
+// ===================================================================
+// Version command
+// ===================================================================
+
+fn cmd_version() {
+    let pkg_version = env!("CARGO_PKG_VERSION");
+    let git_commit = env!("GIT_COMMIT");
+    let git_log = env!("GIT_LOG").replace("\\n", "\n");
+
+    println!("coffer-cli {}", pkg_version);
+    println!("git commit: {}", git_commit);
+    println!();
+    println!("Recent commits:");
+    for line in git_log.lines() {
+        println!("  {}", line);
+    }
 }
 
 // ===================================================================

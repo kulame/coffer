@@ -20,6 +20,8 @@ pub enum AgentRequest {
         working_dir: Option<String>,
         stdin: Option<Vec<u8>>,
         timeout_ms: Option<u64>,
+        #[serde(default)]
+        interactive: bool,
     },
     Upload {
         request_id: String,
@@ -139,4 +141,20 @@ mod tests {
             _ => panic!("wrong variant"),
         }
     }
+}
+
+#[test]
+fn test_exec_serialize_interactive() {
+    let req = AgentRequest::Exec {
+        request_id: "test".into(),
+        cmd: vec!["/bin/sh".into()],
+        env: std::collections::HashMap::new(),
+        working_dir: None,
+        stdin: None,
+        timeout_ms: None,
+        interactive: true,
+    };
+    let s = serde_json::to_string(&req).unwrap();
+    println!("{}", s);
+    assert!(s.contains("\"interactive\":true"));
 }

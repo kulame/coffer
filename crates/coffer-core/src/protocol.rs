@@ -1,48 +1,32 @@
 //! vsock protocol client for host-guest communication.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::Path;
 
-use coffer_protocol::{AgentRequest, AgentResponse, ResponseBody};
+use coffer_protocol::{AgentRequest, AgentResponse, ExecEvent, ResponseBody};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::{CofferError, Result};
 
-/// A synchronous vsock client (used within async tasks).
-///
-/// Firecracker vsock uses a Unix domain socket on the host side.
-/// The socket path is `vsock_uds_path` configured in the VM.
-///
-/// Firecracker 1.5+ vsock protocol:
-/// 1. Connect to the UDS at `vsock_uds_path`.
-/// 2. Send `CONNECT <port>\n`.
-/// 3. Read `OK <host_port>\n` acknowledgement.
-/// 4. Use the same socket for all subsequent communication.
 pub struct VsockClient {
     stream: StdUnixStream,
     read_buf: Vec<u8>,
 }
 
 impl VsockClient {
-    /// Connect to the guest agent via the host-side vsock Unix socket.
-    ///
-    /// Performs the Firecracker `CONNECT` handshake on `port`.
     pub fn connect(vsock_uds_path: &Path, port: u32) -> Result<Self> {
         let mut stream = StdUnixStream::connect(vsock_uds_path)?;
         stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
         stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
-
-        // Firecracker 1.5+ host-initiated vsock handshake.
         write!(stream, "CONNECT {}\n", port)?;
         stream.flush()?;
-
         let mut ack = String::new();
         let mut byte = [0u8; 1];
         loop {
             stream.read_exact(&mut byte)?;
-            if byte[0] == b'\n' {
-                break;
-            }
+            if byte[0] == b'\n' { break; }
             ack.push(byte[0] as char);
         }
         if !ack.starts_with("OK ") {
@@ -50,20 +34,13 @@ impl VsockClient {
                 "Firecracker vsock handshake failed: {}", ack
             )));
         }
-
-        Ok(Self {
-            stream,
-            read_buf: Vec::with_capacity(4096),
-        })
+        Ok(Self { stream, read_buf: Vec::with_capacity(4096) })
     }
 
-    /// Send a request and wait for the response.
     pub fn call(&mut self, req: &AgentRequest) -> Result<AgentResponse> {
         let frame = coffer_protocol::encode_frame(req)?;
         self.stream.write_all(&frame)?;
         self.stream.flush()?;
-
-        // Read until we get a complete JSON line.
         let mut temp_buf = [0u8; 4096];
         loop {
             if let Some(pos) = self.read_buf.iter().position(|&b| b == b'\n') {
@@ -81,24 +58,19 @@ impl VsockClient {
         }
     }
 
-    /// Execute a command and return output.
     pub fn exec(
         &mut self,
         cmd: Vec<String>,
-        env: std::collections::HashMap<String, String>,
+        env: HashMap<String, String>,
         working_dir: Option<String>,
         stdin: Option<Vec<u8>>,
         timeout_ms: Option<u64>,
     ) -> Result<ExecOutput> {
         let req = AgentRequest::Exec {
             request_id: uuid::Uuid::new_v4().to_string(),
-            cmd,
-            env,
-            working_dir,
-            stdin,
-            timeout_ms,
+            cmd, env, working_dir, stdin, timeout_ms,
+            interactive: false,
         };
-
         match self.call(&req)? {
             AgentResponse::Ok { body: ResponseBody::Exec { exit_code, stdout, stderr, duration_ms }, .. } => {
                 Ok(ExecOutput { exit_code, stdout, stderr, duration_ms })
@@ -113,7 +85,6 @@ impl VsockClient {
         }
     }
 
-    /// Health check.
     pub fn ping(&mut self) -> Result<(String, u64)> {
         let req = AgentRequest::Ping {
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -133,4 +104,151 @@ pub struct ExecOutput {
     pub stdout: String,
     pub stderr: String,
     pub duration_ms: u64,
+}
+
+pub async fn exec_interactive(
+    vsock_uds_path: &Path,
+    port: u32,
+    cmd: Vec<String>,
+    env: HashMap<String, String>,
+    working_dir: Option<String>,
+) -> Result<i32> {
+    let stream = tokio::net::UnixStream::connect(vsock_uds_path)
+        .await
+        .map_err(|e| CofferError::AgentCommunication(format!("Connect failed: {}", e)))?;
+
+    // Split the stream into independent read/write halves.
+    // We use into_split() (owned halves) so that each side can be moved
+    // around freely without lifetime issues.
+    let (mut read_stream, mut write_stream) = stream.into_split();
+
+    write_stream.write_all(format!("CONNECT {}\n", port).as_bytes()).await?;
+    write_stream.flush().await?;
+
+    let mut ack = String::new();
+    let mut byte = [0u8; 1];
+    loop {
+        read_stream.read_exact(&mut byte).await?;
+        if byte[0] == b'\n' { break; }
+        ack.push(byte[0] as char);
+    }
+    if !ack.starts_with("OK ") {
+        return Err(CofferError::AgentCommunication(format!(
+            "Firecracker vsock handshake failed: {}", ack
+        )));
+    }
+
+    let req = AgentRequest::Exec {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        cmd, env, working_dir,
+        stdin: None, timeout_ms: None,
+        interactive: true,
+    };
+    let frame = coffer_protocol::encode_frame(&req)?;
+    write_stream.write_all(&frame).await?;
+    write_stream.flush().await?;
+
+    let mut read_buf = Vec::with_capacity(4096);
+    let mut temp_buf = [0u8; 4096];
+
+    // Channel for forwarding stdin data from a blocking thread.
+    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+
+    // Spawn a blocking thread to read from stdin synchronously.
+    let _stdin_thread = std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut reader = std::io::BufReader::new(stdin.lock());
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if stdin_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut stdin_closed = false;
+    loop {
+        if let Some(pos) = read_buf.iter().position(|&b| b == b'\n') {
+            let line = read_buf.drain(..=pos).collect::<Vec<_>>();
+            let resp: AgentResponse = match serde_json::from_slice(&line) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(CofferError::AgentCommunication(format!(
+                        "JSON parse error: {}", e
+                    )));
+                }
+            };
+            match resp {
+                AgentResponse::Event { event: ExecEvent::Stdout { chunk }, .. } => {
+                    print!("{}", chunk);
+                    let _ = std::io::stdout().flush();
+                }
+                AgentResponse::Event { event: ExecEvent::Stderr { chunk }, .. } => {
+                    eprint!("{}", chunk);
+                    let _ = std::io::stderr().flush();
+                }
+                AgentResponse::Event { event: ExecEvent::Exited { .. }, .. } => {}
+                AgentResponse::Ok { body: ResponseBody::Exec { exit_code, .. }, .. } => {
+                    return Ok(exit_code);
+                }
+                AgentResponse::Error { message, code, .. } => {
+                    return Err(CofferError::AgentExec {
+                        message: format!("{:?}: {}", code, message),
+                        exit_code: None,
+                    });
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        tokio::select! {
+            result = read_stream.read(&mut temp_buf) => {
+                match result {
+                    Ok(0) => {
+                        return Err(CofferError::AgentCommunication(
+                            "Connection closed".into(),
+                        ));
+                    }
+                    Ok(n) => {
+                        read_buf.extend_from_slice(&temp_buf[..n]);
+                    }
+                    Err(e) => {
+                        return Err(CofferError::AgentCommunication(format!(
+                            "Read error: {}", e
+                        )));
+                    }
+                }
+            }
+            data = stdin_rx.recv(), if !stdin_closed => {
+                match data {
+                    Some(bytes) => {
+                        if write_stream.write_all(&bytes).await.is_err() {
+                            return Err(CofferError::AgentCommunication(
+                                "Failed to write stdin to vsock".into(),
+                            ));
+                        }
+                        if write_stream.flush().await.is_err() {
+                            return Err(CofferError::AgentCommunication(
+                                "Failed to flush stdin to vsock".into(),
+                            ));
+                        }
+                    }
+                    None => {
+                        // stdin thread exited (EOF on host stdin).
+                        // Do NOT call shutdown() — Firecracker vsock does not
+                        // support half-close and will tear down the whole
+                        // connection, preventing us from reading the response.
+                        stdin_closed = true;
+                    }
+                }
+            }
+        }
+    }
 }

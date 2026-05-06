@@ -194,6 +194,7 @@ async fn test_runtime_acquire_and_release() {
         rootfs_path: rootfs,
         snapshot_state_path: PathBuf::new(), // empty = cold boot
         snapshot_mem_path: PathBuf::new(),
+        snapshot_vsock_path: PathBuf::new(),
         kernel_args: "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/coffer-init".into(),
         vcpus: 1,
         memory_mib: 64,

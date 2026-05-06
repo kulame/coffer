@@ -1,7 +1,7 @@
 //! Coffer Guest Agent — runs inside the MicroVM.
 //!
 //! Listens on vsock port 1024 and handles host requests:
-//! - Exec: run commands with stdout/stderr capture
+//! - Exec: run commands with stdout/stderr capture (batch or streaming)
 //! - Upload: write files
 //! - Download: read files
 //! - Ping: health check
@@ -10,14 +10,14 @@ use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
-use coffer_protocol::{AgentRequest, AgentResponse, ErrorCode, ResponseBody, COFFER_VSOCK_PORT};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use coffer_protocol::{AgentRequest, AgentResponse, ErrorCode, ExecEvent, ResponseBody, COFFER_VSOCK_PORT};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tracing::{error, info, warn};
 
 const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
         .with_env_filter("info")
         .init();
@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn run_unix_listener(
     listener: std::os::unix::net::UnixListener,
     start_time: Instant,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let tokio_listener = tokio::net::UnixListener::from_std(listener)?;
     loop {
         match tokio_listener.accept().await {
@@ -88,44 +88,28 @@ async fn run_unix_listener(
 async fn handle_connection(
     stream: tokio_vsock::VsockStream,
     start_time: Instant,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // tokio-vsock stream implements AsyncRead + AsyncWrite
-    let (read_half, mut write_half) = tokio::io::split(stream);
-    let mut reader = BufReader::new(read_half);
-    let mut line = String::new();
-
-    loop {
-        line.clear();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            break;
-        }
-        let req: AgentRequest = match serde_json::from_str(&line) {
-            Ok(r) => r,
-            Err(e) => {
-                let resp = AgentResponse::Error {
-                    request_id: "unknown".into(),
-                    code: ErrorCode::InvalidRequest,
-                    message: format!("JSON parse error: {}", e),
-                };
-                send_response(&mut write_half, &resp).await?;
-                continue;
-            }
-        };
-
-        let resp = process_request(req, start_time).await;
-        send_response(&mut write_half, &resp).await?;
-    }
-
-    Ok(())
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (read_half, write_half) = tokio::io::split(stream);
+    handle_stream(BufReader::new(read_half), write_half, start_time).await
 }
 
 async fn handle_unix_connection(
     stream: tokio::net::UnixStream,
     start_time: Instant,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let (read_half, mut write_half) = tokio::io::split(stream);
-    let mut reader = BufReader::new(read_half);
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (read_half, write_half) = tokio::io::split(stream);
+    handle_stream(BufReader::new(read_half), write_half, start_time).await
+}
+
+async fn handle_stream<R, W>(
+    mut reader: BufReader<R>,
+    mut writer: W,
+    start_time: Instant,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    R: AsyncReadExt + Unpin,
+    W: AsyncWriteExt + Unpin,
+{
     let mut line = String::new();
 
     loop {
@@ -142,14 +126,225 @@ async fn handle_unix_connection(
                     code: ErrorCode::InvalidRequest,
                     message: format!("JSON parse error: {}", e),
                 };
-                send_response(&mut write_half, &resp).await?;
+                send_response(&mut writer, &resp).await?;
                 continue;
             }
         };
 
-        let resp = process_request(req, start_time).await;
-        send_response(&mut write_half, &resp).await?;
+        match req {
+            AgentRequest::Exec {
+                interactive: true,
+                request_id,
+                cmd,
+                env,
+                working_dir,
+                timeout_ms,
+                ..
+            } => {
+                // Interactive exec takes over the whole connection; extract the
+                // underlying stream so we can use a fresh BufReader.
+                let inner = reader.into_inner();
+                if let Err(e) = handle_interactive_exec(
+                    request_id, cmd, env, working_dir, timeout_ms,
+                    inner, &mut writer,
+                ).await {
+                    let resp = AgentResponse::Error {
+                        request_id: "unknown".into(),
+                        code: ErrorCode::InternalError,
+                        message: format!("Interactive exec failed: {}", e),
+                    };
+                    send_response(&mut writer, &resp).await?;
+                }
+                // After interactive exec the connection is typically closed by
+                // the host; stop reading further requests on this stream.
+                break;
+            }
+            _ => {
+                let resp = process_request(req, start_time).await;
+                send_response(&mut writer, &resp).await?;
+            }
+        }
     }
+
+    Ok(())
+}
+
+async fn handle_interactive_exec<R, W>(
+    request_id: String,
+    cmd: Vec<String>,
+    env: HashMap<String, String>,
+    working_dir: Option<String>,
+    _timeout_ms: Option<u64>,
+    reader: R,
+    writer: &mut W,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    R: AsyncReadExt + Unpin,
+    W: AsyncWriteExt + Unpin,
+{
+    if cmd.is_empty() {
+        let resp = AgentResponse::Error {
+            request_id,
+            code: ErrorCode::InvalidRequest,
+            message: "Empty command".into(),
+        };
+        send_response(writer, &resp).await?;
+        return Ok(());
+    }
+
+    let mut command = tokio::process::Command::new(&cmd[0]);
+    if cmd.len() > 1 {
+        command.args(&cmd[1..]);
+    }
+    for (k, v) in env {
+        command.env(k, v);
+    }
+    command.current_dir(working_dir.unwrap_or_else(|| "/".into()));
+    command.stdin(std::process::Stdio::piped());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+
+    let mut child = command.spawn()?;
+    let child_id = child.id().unwrap_or(0);
+    info!(%child_id, cmd = ?cmd, "Spawned interactive child process");
+
+    // Debug: immediately write a newline to child's stdin and check if child stays alive.
+    if let Some(ref mut child_stdin) = child.stdin {
+        let _ = child_stdin.write_all(b"\n").await;
+        let _ = child_stdin.flush().await;
+        info!(%child_id, "Wrote initial newline to child stdin");
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            warn!(%child_id, ?status, "Child exited immediately after spawn!");
+        }
+        Ok(None) => {
+            info!(%child_id, "Child still running after 100ms");
+        }
+        Err(e) => {
+            warn!(%child_id, ?e, "Failed to check child status");
+        }
+    }
+
+    let mut child_stdin_opt = Some(child.stdin.take().unwrap());
+    let child_stdout = child.stdout.take().unwrap();
+    let child_stderr = child.stderr.take().unwrap();
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ExecEvent>(64);
+
+    // stdout reader task
+    let stdout_tx = event_tx.clone();
+    let stdout_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(child_stdout);
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if stdout_tx.send(ExecEvent::Stdout { chunk }).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // stderr reader task
+    let stderr_tx = event_tx;
+    let stderr_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(child_stderr);
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if stderr_tx.send(ExecEvent::Stderr { chunk }).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Use a fresh BufReader for stdin forwarding so that any leftover state
+    // from the JSON request parsing does not affect stdin reads.
+    let mut stdin_reader = BufReader::new(reader);
+    let mut stdin_buf = [0u8; 4096];
+
+    let mut child_fut = std::pin::pin!(child.wait());
+
+    let exit_code = loop {
+        tokio::select! {
+            Some(event) = event_rx.recv() => {
+                let resp = AgentResponse::Event {
+                    request_id: request_id.clone(),
+                    event,
+                };
+                send_response(writer, &resp).await?;
+            }
+            result = &mut child_fut => {
+                let code = result?.code().unwrap_or(-1);
+                info!(%child_id, %code, "Child process exited");
+                break code;
+            }
+            result = stdin_reader.read(&mut stdin_buf) => {
+                match result {
+                    Ok(0) => {
+                        // EOF on connection — close child's stdin
+                        info!(%child_id, "VSock stdin EOF received, closing child stdin");
+                        drop(child_stdin_opt.take());
+                    }
+                    Ok(n) => {
+                        if let Some(ref mut child_stdin) = child_stdin_opt {
+                            child_stdin.write_all(&stdin_buf[..n]).await?;
+                            child_stdin.flush().await?;
+                        }
+                    }
+                    Err(_) => {
+                        drop(child_stdin_opt.take());
+                    }
+                }
+            }
+        }
+    };
+
+    // Wait for stdout/stderr tasks to finish draining
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
+
+    // Forward any remaining buffered events
+    while let Some(event) = event_rx.recv().await {
+        let resp = AgentResponse::Event {
+            request_id: request_id.clone(),
+            event,
+        };
+        send_response(writer, &resp).await?;
+    }
+
+    // Notify host that child exited
+    let resp = AgentResponse::Event {
+        request_id: request_id.clone(),
+        event: ExecEvent::Exited { exit_code },
+    };
+    send_response(writer, &resp).await?;
+
+    // Final response
+    let resp = AgentResponse::Ok {
+        request_id: request_id.clone(),
+        body: ResponseBody::Exec {
+            exit_code,
+            stdout: String::new(),
+            stderr: String::new(),
+            duration_ms: 0,
+        },
+    };
+    send_response(writer, &resp).await?;
 
     Ok(())
 }
@@ -157,7 +352,7 @@ async fn handle_unix_connection(
 async fn send_response<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     resp: &AgentResponse,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut buf = serde_json::to_vec(resp)?;
     buf.push(b'\n');
     writer.write_all(&buf).await?;
@@ -176,8 +371,23 @@ async fn process_request(req: AgentRequest, start_time: Instant) -> AgentRespons
                 },
             }
         }
-        AgentRequest::Exec { request_id, cmd, env, working_dir, stdin, timeout_ms } => {
+        AgentRequest::Exec {
+            request_id,
+            cmd,
+            env,
+            working_dir,
+            stdin,
+            timeout_ms,
+            interactive: false,
+        } => {
             exec_command(request_id, cmd, env, working_dir, stdin, timeout_ms).await
+        }
+        AgentRequest::Exec { interactive: true, request_id, .. } => {
+            AgentResponse::Error {
+                request_id,
+                code: ErrorCode::InternalError,
+                message: "Interactive exec should be handled by handle_stream".into(),
+            }
         }
         AgentRequest::Upload { request_id, guest_path, data, mode } => {
             upload_file(request_id, guest_path, data, mode).await

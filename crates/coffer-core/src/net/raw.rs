@@ -6,7 +6,6 @@
 //! across `fork`+`exec` as happens when shelling out to `/usr/sbin/ip`.
 
 use std::net::Ipv4Addr;
-use std::os::fd::FromRawFd;
 
 use crate::error::{CofferError, Result};
 
@@ -19,7 +18,6 @@ const IFF_TAP: libc::c_int = 0x0002;
 const IFF_NO_PI: libc::c_int = 0x1000;
 
 const SIOCBRADDBR: libc::c_ulong = 0x0000_89a0;
-const SIOCBRDELBR: libc::c_ulong = 0x0000_89a1;
 const SIOCBRADDIF: libc::c_ulong = 0x0000_89a2;
 const SIOCBRDELIF: libc::c_ulong = 0x0000_89a3;
 
@@ -199,21 +197,6 @@ pub fn create_bridge(name: &str) -> Result<()> {
             return Ok(());
         }
         return Err(CofferError::Network(format!("ioctl(SIOCBRADDBR): {}", err)));
-    }
-    Ok(())
-}
-
-pub fn delete_bridge(name: &str) -> Result<()> {
-    let fd = socket_ioctl()?;
-    let req = ifreq_with_name(name);
-    let rc = unsafe { libc::ioctl(fd, SIOCBRDELBR, req.as_ptr()) };
-    unsafe { libc::close(fd) };
-    if rc < 0 {
-        let err = last_io_err();
-        if err.raw_os_error() == Some(libc::ENXIO) {
-            return Ok(());
-        }
-        return Err(CofferError::Network(format!("ioctl(SIOCBRDELBR): {}", err)));
     }
     Ok(())
 }

@@ -260,6 +260,27 @@ impl Sandbox {
         .map_err(|e| CofferError::TaskJoin(e.to_string()))?
     }
 
+    /// Execute an interactive command with real-time stdin/stdout/stderr streaming.
+    pub async fn exec_interactive(
+        &self,
+        cmd: &[&str],
+        env: &HashMap<String, String>,
+        working_dir: Option<String>,
+    ) -> Result<i32> {
+        let vsock = self.vsock_path.clone();
+        let cmd: Vec<String> = cmd.iter().map(|s| s.to_string()).collect();
+        let env = env.clone();
+
+        crate::protocol::exec_interactive(
+            &vsock,
+            coffer_protocol::COFFER_VSOCK_PORT,
+            cmd,
+            env,
+            working_dir,
+        )
+        .await
+    }
+
     /// Upload a file.
     pub async fn upload_file(&self, guest_path: &str, data: Vec<u8>) -> Result<()> {
         let vsock = self.vsock_path.clone();
@@ -435,6 +456,7 @@ pub fn spawn_vm_process(
             .arg("--api-sock").arg(&chroot_socket)
             .arg("--log-path").arg(&chroot_log)
             .arg("--level").arg("Warn")
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
 
@@ -449,6 +471,7 @@ pub fn spawn_vm_process(
             .arg("--api-sock").arg(&socket_path)
             .arg("--log-path").arg(&log_path)
             .arg("--level").arg("Warn")
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()?;

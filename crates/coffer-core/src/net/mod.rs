@@ -2,7 +2,7 @@
 
 use dashmap::DashMap;
 use tokio::process::Command;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::error::{CofferError, Result};
 
@@ -73,17 +73,9 @@ impl NetworkManager {
 
         // Setup SNAT for bridge subnet.
         let snat_rule = format!("POSTROUTING -s {} ! -o {} -j MASQUERADE", self.config.subnet, bridge);
-        if !iptables_has_rule("nat", &snat_rule).await? {
-            match run_cmd_with_sudo_fallback("iptables", &["-t", "nat", "-A", "POSTROUTING", "-s", &self.config.subnet, "!", "-o", bridge, "-j", "MASQUERADE"]).await {
-                Ok(()) => {}
-                Err(CofferError::Network(msg)) => {
-                    let msg = msg.trim();
-                    return Err(CofferError::Network(format!(
-                        "{} iptables SNAT requires CAP_NET_ADMIN (run with sudo or setcap cap_net_admin+eip on /usr/sbin/iptables).",
-                        msg
-                    )));
-                }
-                Err(e) => return Err(e),
+        if !iptables_has_rule("nat", &snat_rule).await.unwrap_or(false) {
+            if let Err(e) = run_cmd_with_sudo_fallback("iptables", &["-t", "nat", "-A", "POSTROUTING", "-s", &self.config.subnet, "!", "-o", bridge, "-j", "MASQUERADE"]).await {
+                warn!("iptables SNAT setup failed (guest outbound NAT may not work): {}", e);
             }
         }
 
@@ -176,15 +168,31 @@ async fn run_cmd_with_sudo_fallback(cmd: &str, args: &[&str]) -> Result<()> {
         if err.contains("Operation not permitted") || err.contains("Permission denied") {
             let mut sudo_args = vec!["-n", cmd];
             sudo_args.extend(args);
-            let sudo_out = Command::new("sudo").args(&sudo_args).output().await?;
-            if sudo_out.status.success() {
-                return Ok(());
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                Command::new("sudo").args(&sudo_args).output(),
+            ).await {
+                Ok(Ok(sudo_out)) if sudo_out.status.success() => return Ok(()),
+                Ok(Ok(sudo_out)) => {
+                    let sudo_err = String::from_utf8_lossy(&sudo_out.stderr);
+                    return Err(CofferError::Network(format!(
+                        "{} {:?} failed: {} (sudo -n fallback: {})",
+                        cmd, args, err.trim(), sudo_err.trim()
+                    )));
+                }
+                Ok(Err(e)) => {
+                    return Err(CofferError::Network(format!(
+                        "{} {:?} failed: {} (sudo spawn error: {})",
+                        cmd, args, err.trim(), e
+                    )));
+                }
+                Err(_) => {
+                    return Err(CofferError::Network(format!(
+                        "{} {:?} failed: {} (sudo timed out after 3s — passwordless sudo required)",
+                        cmd, args, err.trim()
+                    )));
+                }
             }
-            let sudo_err = String::from_utf8_lossy(&sudo_out.stderr);
-            return Err(CofferError::Network(format!(
-                "{} {:?} failed: {} (sudo -n fallback: {})",
-                cmd, args, err.trim(), sudo_err.trim()
-            )));
         }
         return Err(CofferError::Network(format!("{} {:?} failed: {}", cmd, args, err)));
     }
