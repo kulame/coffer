@@ -99,7 +99,15 @@ pub async fn run_shell_repl(
         loop {
             match event::read() {
                 Ok(event::Event::Key(key)) => {
-                    // Ctrl+] to force-detach from the REPL immediately.
+                    // Ctrl+D: gracefully signal EOF to the guest shell.
+                    if key.code == KeyCode::Char('d')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        // Stop reading keyboard; dropping _stdin_tx lets the
+                        // async side know stdin is closed.
+                        break;
+                    }
+                    // Ctrl+]: force-detach immediately (emergency escape).
                     if key.code == KeyCode::Char(']')
                         && key.modifiers.contains(KeyModifiers::CONTROL)
                     {
@@ -122,6 +130,7 @@ pub async fn run_shell_repl(
 
     let mut read_buf = Vec::with_capacity(4096);
     let mut temp_buf = [0u8; 4096];
+    let mut stdin_closed = false;
     let exit_code = -1;
 
     let result = 'repl: loop {
@@ -174,7 +183,13 @@ pub async fn run_shell_repl(
                     Err(e) => break 'repl Err(anyhow::anyhow!("Read error: {}", e)),
                 }
             }
-            data = stdin_rx.recv() => {
+            data = async {
+                if stdin_closed {
+                    std::future::pending::<Option<Vec<u8>>>().await
+                } else {
+                    stdin_rx.recv().await
+                }
+            } => {
                 match data {
                     Some(bytes) => {
                         if write_stream.write_all(&bytes).await.is_err() {
@@ -184,10 +199,22 @@ pub async fn run_shell_repl(
                             break Ok(exit_code);
                         }
                     }
-                    None => break Ok(exit_code),
+                    None => {
+                        // Input thread dropped its sender => user pressed Ctrl-D.
+                        // Shutdown the write half to send EOF to the agent,
+                        // then keep the loop alive until the guest shell exits.
+                        stdin_closed = true;
+                        let _ = write_stream.shutdown().await;
+                    }
                 }
             }
-            size = resize_rx.recv() => {
+            size = async {
+                if stdin_closed {
+                    std::future::pending::<Option<(u16, u16)>>().await
+                } else {
+                    resize_rx.recv().await
+                }
+            } => {
                 if let Some((cols, rows)) = size {
                     let req = AgentRequest::ResizePty { cols, rows };
                     if let Ok(frame) = coffer_protocol::encode_frame(&req) {
