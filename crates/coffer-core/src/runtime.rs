@@ -266,6 +266,8 @@ impl Sandbox {
         cmd: &[&str],
         env: &HashMap<String, String>,
         working_dir: Option<String>,
+        tty: bool,
+        window_size: Option<coffer_protocol::WindowSize>,
     ) -> Result<i32> {
         let vsock = self.vsock_path.clone();
         let cmd: Vec<String> = cmd.iter().map(|s| s.to_string()).collect();
@@ -277,6 +279,8 @@ impl Sandbox {
             cmd,
             env,
             working_dir,
+            tty,
+            window_size,
         )
         .await
     }

@@ -9,6 +9,9 @@ use clap::{Parser, Subcommand};
 
 use coffer_core::{Runtime, RuntimeConfig, TemplateManager};
 
+mod repl;
+mod tui;
+
 // ===================================================================
 // CLI definition
 // ===================================================================
@@ -464,7 +467,6 @@ async fn cmd_shell(args: ShellArgs) -> Result<i32> {
         .map_err(|e| anyhow::anyhow!("Failed to initialize runtime: {}", e))?;
 
     let template_id = args.template;
-    let shell = args.shell;
 
     eprintln!("Acquiring sandbox (template: {}) ... ", template_id);
     let handle = runtime
@@ -475,18 +477,32 @@ async fn cmd_shell(args: ShellArgs) -> Result<i32> {
     eprintln!("{}", vm_id);
 
     let sandbox = handle.sandbox();
-
     let env: HashMap<String, String> = args.env.into_iter().collect();
 
-    eprintln!("Starting interactive shell ({}). Press Ctrl+D or type 'exit' to quit.", shell);
+    // ── Shell detection: prefer /bin/bash, fall back to /bin/sh ──
+    let shell = if args.shell == "/bin/bash" {
+        match sandbox.exec(&["test", "-x", "/bin/bash"], &env, 5000).await {
+            Ok(output) if output.exit_code == 0 => "/bin/bash".to_string(),
+            _ => {
+                eprintln!("Note: /bin/bash not found in sandbox, falling back to /bin/sh");
+                "/bin/sh".to_string()
+            }
+        }
+    } else {
+        args.shell
+    };
 
-    let shell_start = std::time::Instant::now();
-    let exit_code = sandbox
-        .exec_interactive(&[&shell], &env, args.working_dir)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    let shell_duration = shell_start.elapsed();
-    eprintln!("Shell exited with code {} after {:?}", exit_code, shell_duration);
+    let vsock_path = sandbox.vsock_path().to_path_buf();
+
+    let exit_code = repl::run_shell_repl(
+        &vsock_path,
+        coffer_protocol::COFFER_VSOCK_PORT,
+        &shell,
+        env,
+        args.working_dir,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     eprintln!("\nSandbox {} released to warm pool.", vm_id);
     Ok(exit_code)

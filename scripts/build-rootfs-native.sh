@@ -93,6 +93,10 @@ mount --move /oldroot/proc /proc 2>/dev/null
 mount --move /oldroot/sys /sys 2>/dev/null
 mount --move /oldroot/dev /dev 2>/dev/null
 
+# devpts is required for openpty() used by interactive exec.
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts 2>/dev/null
+
 # If coffer-agent exists, start it; otherwise drop to a shell.
 if [ -x /usr/local/bin/coffer-agent ]; then
     exec /usr/local/bin/coffer-agent

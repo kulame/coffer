@@ -70,6 +70,8 @@ impl VsockClient {
             request_id: uuid::Uuid::new_v4().to_string(),
             cmd, env, working_dir, stdin, timeout_ms,
             interactive: false,
+            tty: false,
+            window_size: None,
         };
         match self.call(&req)? {
             AgentResponse::Ok { body: ResponseBody::Exec { exit_code, stdout, stderr, duration_ms }, .. } => {
@@ -112,18 +114,20 @@ pub async fn exec_interactive(
     cmd: Vec<String>,
     env: HashMap<String, String>,
     working_dir: Option<String>,
+    tty: bool,
+    window_size: Option<coffer_protocol::WindowSize>,
 ) -> Result<i32> {
+    eprintln!("[host] exec_interactive: connecting to {:?}:{}", vsock_uds_path, port);
     let stream = tokio::net::UnixStream::connect(vsock_uds_path)
         .await
         .map_err(|e| CofferError::AgentCommunication(format!("Connect failed: {}", e)))?;
+    eprintln!("[host] connected");
 
-    // Split the stream into independent read/write halves.
-    // We use into_split() (owned halves) so that each side can be moved
-    // around freely without lifetime issues.
     let (mut read_stream, mut write_stream) = stream.into_split();
 
     write_stream.write_all(format!("CONNECT {}\n", port).as_bytes()).await?;
     write_stream.flush().await?;
+    eprintln!("[host] sent CONNECT");
 
     let mut ack = String::new();
     let mut byte = [0u8; 1];
@@ -132,21 +136,26 @@ pub async fn exec_interactive(
         if byte[0] == b'\n' { break; }
         ack.push(byte[0] as char);
     }
+    eprintln!("[host] handshake: {}", ack.trim());
     if !ack.starts_with("OK ") {
         return Err(CofferError::AgentCommunication(format!(
             "Firecracker vsock handshake failed: {}", ack
         )));
     }
 
+    let req_cmd = cmd.clone();
     let req = AgentRequest::Exec {
         request_id: uuid::Uuid::new_v4().to_string(),
         cmd, env, working_dir,
         stdin: None, timeout_ms: None,
         interactive: true,
+        tty,
+        window_size,
     };
     let frame = coffer_protocol::encode_frame(&req)?;
     write_stream.write_all(&frame).await?;
     write_stream.flush().await?;
+    eprintln!("[host] sent exec request: cmd={:?}, tty={:?}", req_cmd, tty);
 
     let mut read_buf = Vec::with_capacity(4096);
     let mut temp_buf = [0u8; 4096];
@@ -186,24 +195,32 @@ pub async fn exec_interactive(
             };
             match resp {
                 AgentResponse::Event { event: ExecEvent::Stdout { chunk }, .. } => {
+                    eprintln!("[host] stdout: {:?}", &chunk[..chunk.len().min(80)]);
                     print!("{}", chunk);
                     let _ = std::io::stdout().flush();
                 }
                 AgentResponse::Event { event: ExecEvent::Stderr { chunk }, .. } => {
+                    eprintln!("[host] stderr: {:?}", &chunk[..chunk.len().min(80)]);
                     eprint!("{}", chunk);
                     let _ = std::io::stderr().flush();
                 }
-                AgentResponse::Event { event: ExecEvent::Exited { .. }, .. } => {}
+                AgentResponse::Event { event: ExecEvent::Exited { exit_code }, .. } => {
+                    eprintln!("[host] event: Exited {}", exit_code);
+                }
                 AgentResponse::Ok { body: ResponseBody::Exec { exit_code, .. }, .. } => {
+                    eprintln!("[host] response: Ok, exit_code={}", exit_code);
                     return Ok(exit_code);
                 }
                 AgentResponse::Error { message, code, .. } => {
+                    eprintln!("[host] response: Error {:?}: {}", code, message);
                     return Err(CofferError::AgentExec {
                         message: format!("{:?}: {}", code, message),
                         exit_code: None,
                     });
                 }
-                _ => {}
+                _ => {
+                    eprintln!("[host] response: other");
+                }
             }
             continue;
         }
@@ -212,6 +229,7 @@ pub async fn exec_interactive(
             result = read_stream.read(&mut temp_buf) => {
                 match result {
                     Ok(0) => {
+                        eprintln!("[host] read_stream EOF");
                         return Err(CofferError::AgentCommunication(
                             "Connection closed".into(),
                         ));

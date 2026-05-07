@@ -24,3 +24,9 @@ tokio-vsock = "0.5"
 
 # Error handling
 thiserror = "2.0"
+
+# PID 1 fork
+libc = "0.2"
+
+# PTY allocation for interactive TTY shells
+nix = { version = "0.29", features = ["fs", "process", "term"] }

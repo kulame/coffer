@@ -254,17 +254,15 @@ verify-data:
 		echo "✓ kernel already present"; \
 	fi
 
-# Agent
-	@if [ ! -f "$(DESTDIR)$(COFFER_HOME)/bin/coffer-agent" ]; then \
-		if [ -f $(LOCAL_AGENT) ]; then \
-			install -m 755 $(LOCAL_AGENT) $(DESTDIR)$(COFFER_HOME)/bin/coffer-agent; \
-			echo "✓ Installed coffer-agent (built) -> $(COFFER_HOME)/bin/coffer-agent"; \
-		elif [ -f rootfs-builder/coffer-agent ]; then \
-			install -m 755 rootfs-builder/coffer-agent $(DESTDIR)$(COFFER_HOME)/bin/coffer-agent; \
-			echo "✓ Installed coffer-agent (pre-built) -> $(COFFER_HOME)/bin/coffer-agent"; \
-		else \
-			echo "⚠ coffer-agent not found. Run 'make build' first."; \
-		fi \
+# Agent — always update from local build if available to ensure static-linked binary
+	@if [ -f $(LOCAL_AGENT) ]; then \
+		install -m 755 $(LOCAL_AGENT) $(DESTDIR)$(COFFER_HOME)/bin/coffer-agent; \
+		echo "✓ Installed/updated coffer-agent (built) -> $(COFFER_HOME)/bin/coffer-agent"; \
+	elif [ -f rootfs-builder/coffer-agent ]; then \
+		install -m 755 rootfs-builder/coffer-agent $(DESTDIR)$(COFFER_HOME)/bin/coffer-agent; \
+		echo "✓ Installed coffer-agent (pre-built) -> $(COFFER_HOME)/bin/coffer-agent"; \
+	elif [ ! -f "$(DESTDIR)$(COFFER_HOME)/bin/coffer-agent" ]; then \
+		echo "⚠ coffer-agent not found. Run 'make build' first."; \
 	else \
 		echo "✓ coffer-agent already present"; \
 	fi
@@ -361,7 +359,7 @@ rootfs:
 # ===================================================================
 # Full template (rootfs + snapshot)
 # ===================================================================
-template: rootfs kernel firecracker build install-bin setup-perms
+template: rootfs kernel firecracker build install-bin setup-perms verify-data
 	@echo "Creating template snapshot..."
 	@if [ -f "$(BINDIR)/coffer-cli" ]; then \
 		CLI="$(BINDIR)/coffer-cli"; \

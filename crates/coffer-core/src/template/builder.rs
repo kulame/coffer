@@ -236,6 +236,10 @@ mount --move /oldroot/proc /proc 2>/dev/null
 mount --move /oldroot/sys /sys 2>/dev/null
 mount --move /oldroot/dev /dev 2>/dev/null
 
+# devpts is required for openpty() used by interactive exec.
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts 2>/dev/null
+
 # Start coffer-agent in the background so the host can communicate with the guest.
 if [ -x /tmp/test_vsock ]; then
     /tmp/test_vsock &
@@ -273,8 +277,10 @@ fi
         };
 
         if !agent_bin.exists() {
-            warn!(path = %agent_bin.display(), "Agent binary not found, skipping injection");
-            return Ok(());
+            return Err(CofferError::TemplateBuild(format!(
+                "Agent binary not found at {}. Ensure coffer-agent is built and installed (e.g. 'make build' or 'make verify-data').",
+                agent_bin.display()
+            )));
         }
 
         let rootfs_dir = self.work_dir.join("rootfs").join("rootfs");

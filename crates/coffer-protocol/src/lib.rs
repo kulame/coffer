@@ -7,6 +7,16 @@ pub const COFFER_VSOCK_PORT: u32 = 1024;
 pub const COFFER_AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ===================================================================
+// Terminal / TTY helpers
+// ===================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowSize {
+    pub rows: u16,
+    pub cols: u16,
+}
+
+// ===================================================================
 // Requests (Host → Guest)
 // ===================================================================
 
@@ -22,6 +32,9 @@ pub enum AgentRequest {
         timeout_ms: Option<u64>,
         #[serde(default)]
         interactive: bool,
+        #[serde(default)]
+        tty: bool,
+        window_size: Option<WindowSize>,
     },
     Upload {
         request_id: String,
@@ -35,6 +48,10 @@ pub enum AgentRequest {
     },
     Ping {
         request_id: String,
+    },
+    ResizePty {
+        cols: u16,
+        rows: u16,
     },
 }
 
@@ -153,8 +170,11 @@ fn test_exec_serialize_interactive() {
         stdin: None,
         timeout_ms: None,
         interactive: true,
+        tty: true,
+        window_size: Some(WindowSize { rows: 24, cols: 80 }),
     };
     let s = serde_json::to_string(&req).unwrap();
     println!("{}", s);
     assert!(s.contains("\"interactive\":true"));
+    assert!(s.contains("\"tty\":true"));
 }
