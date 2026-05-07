@@ -87,7 +87,7 @@ pub async fn run_shell_repl(
         .map_err(|e| anyhow::anyhow!("Failed to enable raw mode: {}", e))?;
     let _raw_guard = RawModeGuard;
 
-    eprint!("\r\n=== Coffer Shell ===\r\nPress Ctrl-D or send 'exit' to quit\r\n\r\n");
+    eprint!("\r\n=== Coffer Shell ===\r\nPress Ctrl-D or type 'exit' to quit\r\n\r\n");
 
     // ── Channels for cross-thread communication ──
     let (_stdin_tx, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -99,8 +99,8 @@ pub async fn run_shell_repl(
         loop {
             match event::read() {
                 Ok(event::Event::Key(key)) => {
-                    // Ctrl+D (EOT) to detach from the REPL immediately.
-                    if key.code == KeyCode::Char('d')
+                    // Ctrl+] to force-detach from the REPL immediately.
+                    if key.code == KeyCode::Char(']')
                         && key.modifiers.contains(KeyModifiers::CONTROL)
                     {
                         let _ = _quit_tx.send(());
@@ -127,8 +127,7 @@ pub async fn run_shell_repl(
     let result = 'repl: loop {
         tokio::select! {
             _ = quit_rx.recv() => {
-                eprint!("\r\n[detached from coffer shell]\r\n");
-                break 'repl Ok(exit_code);
+                break 'repl Ok(0);
             }
             result = read_stream.read(&mut temp_buf) => {
                 match result {
